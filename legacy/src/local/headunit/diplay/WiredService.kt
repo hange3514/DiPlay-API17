@@ -113,6 +113,16 @@ class WiredService:VpnService() {
   try{work.execute{synchronized(resourceLock){if(closed)return@execute;connectingWorkers.incrementAndGet()};try{connect()}catch(e:Throwable){fail(e)}finally{connectingWorkers.decrementAndGet()}}}catch(e:Throwable){fail(e)};return START_NOT_STICKY
  }
  private fun check(){if(closed)throw InterruptedException("Connection cancelled")}
+  private fun isPairRecordMismatch(error:Throwable):Boolean {
+   var cause:Throwable?=error;var depth=0
+   while(cause!=null&&depth++<8){
+    val message=cause.message.orEmpty()
+    if(message.contains("InvalidPairRecord",true)||message.contains("InvalidHostID",true))return true
+    if(cause.javaClass.simpleName=="TlsFatalAlert"&&message.contains("handshake_failure",true))return true
+    cause=cause.cause
+   }
+   return false
+  }
  private fun own(c:Closeable,name:String=c.javaClass.simpleName){synchronized(resourceLock){if(!closed){handles.add(c);resourceNames[c]=name;return}};c.close();throw InterruptedException("Connection cancelled")}
  private fun selectPhone():UsbDevice {
   val until=SystemClock.elapsedRealtime()+15000;var waiting=false
@@ -160,10 +170,28 @@ class WiredService:VpnService() {
   val ncm=try{NcmUsbBridge.open(nc,fn,onDiagnostic={log("NCM",it)})}catch(e:Throwable){nc.close();throw e};own(ncm,"ncm_usb");usbLinked=true
   phase("usbmux_handshake");val mux=Iap2UsbMuxHost.open(usbSession,onDiagnostic={log("MUX",it)});own(mux,"usbmux_host")
   phase("lockdown_pairing")
-  val store=IdentityStore(this);val savedPair=store.loadPair();log("LOCKDOWN","saved_pair_present=${savedPair!=null} profile=2");note("PAIRING",if(savedPair!=null)"正在使用已保存的 iPhone 配对信息" else "首次配对，请保持 iPhone 解锁并确认信任");var pair=savedPair?:LockdownPairingClient(mux,onDiagnostic={log("LOCKDOWN",it)}).pair("DiPlay API17",store.hostId,store.buid,90000,isCancelled={closed}).pairRecord.also{store.savePair(it)}
-  phase("carkit_tls");check();val carkit=try{LockdownCarKitClient(mux).open(pair,"DiPlay API17")}catch(e:Exception){var cause:Throwable?=e;var rejected=false;while(cause!=null){val m=cause.message.orEmpty();if(m.contains("InvalidPairRecord",true)||m.contains("InvalidHostID",true))rejected=true;cause=cause.cause};if(!rejected)throw e;store.clearPair();note("PAIRING_RETRY","保存的配对已失效，请在iPhone上重新确认信任");pair=LockdownPairingClient(mux,onDiagnostic={log("LOCKDOWN",it)}).pair("DiPlay API17",store.hostId,store.buid,90000,isCancelled={closed}).pairRecord.also{store.savePair(it)};LockdownCarKitClient(mux).open(pair,"DiPlay API17")};own(carkit,"carkit")
+  val store=IdentityStore(this);val pairCandidates=store.loadPairs();log("LOCKDOWN","saved_pair_count=${pairCandidates.size} profile=3")
+  var pair:LockdownPairRecord?=null;var carkit:BlockingDuplexByteStream?=null
+  phase("carkit_tls")
+  for(candidate in pairCandidates){
+   check()
+   try {
+    carkit=LockdownCarKitClient(mux).open(candidate,"DiPlay API17");pair=candidate
+    log("LOCKDOWN","saved_pair_accepted=true");break
+   } catch(e:Exception) {
+    if(!isPairRecordMismatch(e))throw e
+    log("LOCKDOWN","saved_pair_rejected=true failureClass=${e.javaClass.simpleName}")
+   }
+  }
+  if(carkit==null){
+   note("PAIRING",if(pairCandidates.isEmpty())"首次配对，请保持 iPhone 解锁并确认信任" else "此 iPhone 尚无可用配对记录，请保持解锁并确认信任")
+   val newPair=LockdownPairingClient(mux,onDiagnostic={log("LOCKDOWN",it)}).pair("DiPlay API17",store.hostId,store.buid,90000,isCancelled={closed}).pairRecord
+   store.savePair(newPair);pair=newPair;carkit=LockdownCarKitClient(mux).open(newPair,"DiPlay API17")
+  }
+  val activePair=pair?:throw IOException("iPhone配对记录不可用");val activeCarkit=carkit?:throw IOException("iPhone CarKit TLS通道未建立")
+  own(activeCarkit,"carkit");store.markPairUsed(activePair)
   phase("iap2_setup");note("CARKIT","iPhone CarKit通道已打开，正在建立协议会话")
-  val csm=Iap2Session.open(carkit,traceContext="api17",onTrace={log("IAP2",it)});own(csm,"iap2")
+  val csm=Iap2Session.open(activeCarkit,traceContext="api17",onTrace={log("IAP2",it)});own(csm,"iap2")
   phase("mfi_identity");val auth=VerifiedMfiCache.get(this){log("MFI","challenge signed bytes=$it")}
   val identity=store.identity();val mac=ncm.hostMac?:byteArrayOf(2,0,0,0,0,17);val macText=mac.joinToString(":"){"%02x".format(it.toInt() and 255)}
   // API17 has no per-app VPN routing. Only the USB link-local /64 is routed; no default/DNS routes.
