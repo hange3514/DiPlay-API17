@@ -28,12 +28,24 @@ class LegacyTlsChannel private constructor(private val underlying:BlockingDuplex
  }
  override fun close(){if(closed)return;closed=true;underlying.close()}
  companion object {
-  fun client(record:LockdownPairRecord):DefaultTlsClient {
-   val crypto=BcTlsCrypto(SecureRandom())
+  private class Material(val certificate:ByteArray,val key:org.bouncycastle.crypto.params.AsymmetricKeyParameter)
+  // A single immutable pairing identity, never a live TLS connection/session or challenge.
+  // IdentityStore returns the same immutable record until pairing changes.
+  private var cachedRecord:LockdownPairRecord?=null
+  private var cachedMaterial:Material?=null
+  private val random=SecureRandom()
+  @Synchronized private fun material(record:LockdownPairRecord):Material {
+   if(cachedRecord===record)return cachedMaterial!!
    val certPem=record.rootCertificatePem.toString(Charsets.US_ASCII).replace("-----BEGIN CERTIFICATE-----","").replace("-----END CERTIFICATE-----","")
    val certificate=Base64Compat.decodeMime(certPem.toByteArray(Charsets.US_ASCII))
    val raw=record.rootPrivateKeyPem.toString(Charsets.US_ASCII).replace("-----BEGIN PRIVATE KEY-----","").replace("-----END PRIVATE KEY-----","")
    val encoded=Base64Compat.decodeMime(raw.toByteArray(Charsets.US_ASCII));val key=try{PrivateKeyFactory.createKey(encoded)}finally{encoded.fill(0)}
+   return Material(certificate,key).also{cachedMaterial=it;cachedRecord=record}
+  }
+  fun prepare(record:LockdownPairRecord){material(record);random.nextBytes(ByteArray(1))}
+  fun client(record:LockdownPairRecord):DefaultTlsClient {
+   val crypto=BcTlsCrypto(random)
+   val material=material(record);val certificate=material.certificate;val key=material.key
    return object:DefaultTlsClient(crypto){
     override fun getSupportedVersions()=arrayOf(ProtocolVersion.TLSv12,ProtocolVersion.TLSv11,ProtocolVersion.TLSv10)
     override fun getAuthentication()=object:TlsAuthentication {

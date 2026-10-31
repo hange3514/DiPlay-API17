@@ -12,12 +12,11 @@ final class UpdateFiles {
   if(!sha.matches("[a-f0-9]{64}"))throw new IOException("版本信息无效");
   return new File(folder,"DiPlay-"+sha+".apk");
  }
- static void requireSpace(File folder,long size)throws IOException {
-  if(size<1||size>OnlineUpdate.MAX_APK)throw new IOException("版本信息无效");
-  // Some vendor filesystems cannot report capacity. In that case the bounded
-  // write still surfaces ENOSPC; never assume a zero/unknown total means full.
+ static void requireSpace(File folder,long size)throws IOException { requireSpace(folder,size,OnlineUpdate.MAX_APK); }
+ static void requireSpace(File folder,long size,long max)throws IOException {
+  if(size<1||size>max)throw new IOException("invalid package size");
   long total=folder.getTotalSpace(),available=folder.getUsableSpace();
-  if(total>0&&available<size+1024*1024L)throw new IOException("存储空间不足");
+  if(total>0&&available<size+1024*1024L)throw new IOException("insufficient storage");
  }
  static void promote(File part,File target)throws IOException {
   // Android's rename replaces an existing file atomically. Keep the old valid APK

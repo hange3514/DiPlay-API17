@@ -14,13 +14,18 @@ class VideoInput(private val capacity:Int=6) {
   config=bytes.copyOf();queue.clear();waitingForKeyframe=true;return true
  }
  /** false means a frame was lost and recovery may be needed; caller rate-limits requests. */
- @Synchronized fun offer(bytes:ByteArray):Boolean {
+ fun offer(bytes:ByteArray):Boolean = enqueue(bytes,false)
+ /** Ownership moves to this queue. The producer must never mutate/reuse bytes after this call. */
+ fun offerOwned(bytes:ByteArray):Boolean = enqueue(bytes,true)
+ @Synchronized private fun enqueue(bytes:ByteArray,owned:Boolean):Boolean {
   val c=config?:return true
-  if(bytes.size>1024*1024)return false
+  if(bytes.isEmpty())return true
+  // Once any reference frame is lost, later deltas cannot safely continue this GOP.
+  if(bytes.size>1024*1024){queue.clear();waitingForKeyframe=true;return false}
   // Scan NAL bytes only during recovery. Normal P-frames already belong to the
   // current GOP; walking every byte on Dalvik wastes a full frame-sized pass.
   if(waitingForKeyframe){if(!isKeyframe(bytes))return false;waitingForKeyframe=false}
-  val frame=Frame(c,bytes.copyOf(),System.nanoTime())
+  val frame=Frame(c,if(owned)bytes else bytes.copyOf(),System.nanoTime())
   if(queue.offer(frame))return true
   val key=isKeyframe(bytes)
   queue.clear();waitingForKeyframe=!key

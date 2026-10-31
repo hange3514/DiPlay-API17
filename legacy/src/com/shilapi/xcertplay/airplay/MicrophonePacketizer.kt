@@ -47,6 +47,17 @@ data class MicrophoneConfig(
             formatBits and 0x20000000L != 0L -> 24_000
             else -> OPUS_CAPTURE_RATE
         }
+
+        /**
+         * PCM frame length when the iPhone does not specify framesPerPacket. Pick the longest
+         * common frame that fits a 1,500-byte IPv6 link MTU after RTP sealing and IP/UDP headers.
+         */
+        fun pcmFrameMillis(sampleRate: Int, channels: Int): Int = PCM_FRAME_MILLIS.firstOrNull { millis ->
+            MicrophonePacketizer.SEAL_OVERHEAD + sampleRate * millis / 1000 * channels * 2 <= MAX_UDP_PAYLOAD
+        } ?: PCM_FRAME_MILLIS.last()
+
+        private val PCM_FRAME_MILLIS = listOf(20, 10, 5)
+        private const val MAX_UDP_PAYLOAD = 1500 - 40 - 8
     }
 }
 
@@ -67,6 +78,7 @@ object MicrophonePacketizer {
     const val RTP_HEADER_LEN = 12
     const val TAG_LEN = 16
     const val NONCE_LEN = 8
+    const val SEAL_OVERHEAD = RTP_HEADER_LEN + TAG_LEN + NONCE_LEN
 
     fun sealPacket(
         key: ByteArray,
@@ -101,11 +113,25 @@ object MicrophonePacketizer {
         return packet
     }
 
-    /** Captured Android PCM is little-endian; CarPlay's wired microphone payload is big-endian. */
-    fun toWirePcm(pcmLittleEndian: ByteArray): ByteArray {
+    /** Uplink only: captured Android microphone PCM is little-endian; CarPlay mic wire PCM is big-endian. */
+    fun toCarPlayMicrophoneWirePcm(pcmLittleEndian: ByteArray): ByteArray {
         val output = pcmLittleEndian.copyOf()
         var index = 0
         while (index + 1 < output.size) {
+            val first = output[index]
+            output[index] = output[index + 1]
+            output[index + 1] = first
+            index += 2
+        }
+        return output
+    }
+
+    /** AirPlay LPCM downlink uses the opposite byte order from Android AudioTrack PCM16. */
+    fun toAndroidPcm16(wireBigEndian: ByteArray): ByteArray {
+        require(wireBigEndian.size % 2 == 0) { "PCM16 payload must contain complete samples" }
+        val output = wireBigEndian.copyOf()
+        var index = 0
+        while (index < output.size) {
             val first = output[index]
             output[index] = output[index + 1]
             output[index + 1] = first

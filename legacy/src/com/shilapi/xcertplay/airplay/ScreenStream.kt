@@ -3,6 +3,9 @@ package com.shilapi.xcertplay.airplay
 import android.util.Log
 import java.io.Closeable
 import java.io.InputStream
+import java.io.BufferedInputStream
+import java.io.EOFException
+import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -82,13 +85,17 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
         var failure: Throwable? = null
         val stats = StreamReceiveStats("video", onDiagnostic)
         try {
-            val input = sock.getInputStream()
+            // A buffered read may return immediately with available data: this is not
+            // an extra frame queue and never waits to fill the 16KiB buffer.
+            val input = BufferedInputStream(sock.getInputStream(), 16 * 1024)
+            val header = ByteArray(HEADER_LEN)
             while (!closed.get()) {
                 stats.reading()
-                val header = readFully(input, HEADER_LEN) ?: break
+                if (!readFully(input, header)) break
                 val bodySize = readU32Le(header, 0)
-                if (bodySize > MAX_BODY) break
-                val body = readFully(input, bodySize) ?: break
+                if (bodySize < 0 || bodySize > MAX_BODY) throw IOException("Invalid video body size")
+                val body = ByteArray(bodySize)
+                if (!readFully(input, body)) throw EOFException("Truncated video body")
                 val arrivalNanos = System.nanoTime()
                 stats.received(HEADER_LEN + bodySize)
                 onMessage(header, body, stats, arrivalNanos)
@@ -135,16 +142,18 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
         }
     }
 
-    private fun readFully(input: InputStream, length: Int): ByteArray? {
-        if (length < 0) return null
-        val output = ByteArray(length)
+    private fun readFully(input: InputStream, output: ByteArray): Boolean {
         var offset = 0
-        while (offset < length) {
-            val read = input.read(output, offset, length - offset)
-            if (read < 0) return null
+        while (offset < output.size) {
+            val read = input.read(output, offset, output.size - offset)
+            if (read < 0) {
+                if (offset == 0) return false
+                throw EOFException("Truncated video message")
+            }
+            if (read == 0) throw IOException("Video read made no progress")
             offset += read
         }
-        return output
+        return true
     }
 
     private companion object {

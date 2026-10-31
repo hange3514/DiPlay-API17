@@ -35,8 +35,8 @@ class Ipv6NcmBridge(
     private var loggedInbound = false
     private var loggedOutbound = false
     private var loggedWaitingForPeer = false
-    private var inboundLogBudget = 16
-    private var outboundLogBudget = 24
+    private var inboundLogBudget = 8
+    private var outboundLogBudget = 8
     private var neighborLogBudget = 4
     private var congestionLogBudget = 4
     private fun trace(message:String){Log.i(TAG,message);runCatching{onDiagnostic(message)}}
@@ -82,7 +82,7 @@ class Ipv6NcmBridge(
                 }
                 if (inboundLogBudget > 0) {
                     inboundLogBudget--
-                    trace("ncm inbound ${frame.summary(ipv6.payloadOffset)}")
+                    trace("ncm startup inbound ${frame.summary(ipv6.payloadOffset)}")
                 }
                 if (!packets.write(frame, ipv6.payloadOffset, ipv6.payloadLength) && running.get() && congestionLogBudget>0){congestionLogBudget--;trace("ncm tun output congested; packet dropped")}
             }
@@ -117,7 +117,7 @@ class Ipv6NcmBridge(
                 }
                 if (outboundLogBudget > 0) {
                     outboundLogBudget--
-                    trace("ncm outbound ${ipv6.summary(0)}")
+                    trace("ncm startup outbound ${ipv6.summary(0)}")
                 }
                 val multicastMac = EthernetIpv6Codec.multicastDestinationMac(ipv6)
                 val mac = multicastMac ?: peerMac

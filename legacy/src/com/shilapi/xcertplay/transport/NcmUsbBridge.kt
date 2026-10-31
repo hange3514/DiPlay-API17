@@ -28,6 +28,8 @@ class NcmUsbBridge internal constructor(
     private val statusEndpoint: UsbEndpoint?,
     private val claimedInterfaces: List<UsbInterface>,
     descriptorHostMac: ByteArray?,
+    private val startupProfile: Int,
+    private val controlInterface: Int,
     private val onDiagnostic: (String) -> Unit = {},
 ) : Closeable {
     private val descriptorMac = descriptorHostMac?.copyOf()
@@ -35,6 +37,10 @@ class NcmUsbBridge internal constructor(
     private val stateLock = Any()
     private val readLock = Any()
     private val writeLock = Any()
+    // This bridge exclusively owns connection. close() takes BOTH operation locks
+    // before closing it; no bulk operation can race descriptor reuse. Avoid two
+    // extra syscalls/JNI transitions (dup + close) for every packet on this hot path.
+    private val ioDescriptor = connection.fileDescriptor
     private var closed = false
     private var failure: IphoneUsbException? = null
     private var sequence = 0
@@ -43,6 +49,17 @@ class NcmUsbBridge internal constructor(
     private var wroteFirstBlock = false
     @Volatile private var receivedFirstBlock = false
     private var startupWaitUsed = false
+    private val startupPending = AtomicBoolean(true)
+    private val receivePending = AtomicBoolean(true)
+    private val earlyReceive = EarlyUsbReceive()
+    private var queuedReceiveUsed=false
+    private var initialReadCalls=0
+    private var initialReadTimeouts=0
+    private var firstReadAt=0L
+    private var readWaitMs=0L
+    private val openedAt = System.nanoTime()
+    @Volatile private var linkUpAt = 0L
+    @Volatile private var carrierUp = false
     private val frames = ArrayDeque<ByteArray>()
     private var queuedBytes = 0
     private var buffered = ByteArray(0)
@@ -58,6 +75,18 @@ class NcmUsbBridge internal constructor(
         }
     }
 
+    fun startEarlyReceive() {
+        if(!UsbStartupProfile.earlyReceive(startupProfile))return
+        checkOpen()
+        earlyReceive.start(readLock,{
+            checkOpen()
+            val length=readChunk(500)
+            if(length!=null){appendBuffered(readBuffer,length);true}else false
+        },{error->
+            synchronized(stateLock){if(!closed)failSession("NCM early receive failed",error)}
+        })
+    }
+
     /** Wraps one Ethernet frame in one NTB16 block and writes it to bulk OUT. */
     fun send(frame: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
         checkOpen()
@@ -67,19 +96,39 @@ class NcmUsbBridge internal constructor(
             this.sequence.also { this.sequence = (this.sequence + 1) and 0xffff }
         }
         val block = Ntb16Codec.build(frame, sequence)
-        val fd=synchronized(stateLock){checkOpenLocked();NativeUsb.duplicate(connection.fileDescriptor)}
-        if(fd<0)throw failSession("NCM native write dup errno=${-fd}")
+        val fd=ioDescriptor
         var attempts=0
         val at=System.nanoTime()
         val replayable=StartupUsbWrite.retryable(frame,block.size)
         val waitForReady=replayable&&!startupWaitUsed&&!wroteFirstBlock&&!receivedFirstBlock
         if(waitForReady)startupWaitUsed=true
-        val transferred=try{if(waitForReady)StartupUsbWrite.awaitReady(
+        val transferred=if(waitForReady&&UsbStartupProfile.queued(startupProfile)){
+            if(UsbStartupProfile.waitCarrier(startupProfile)){
+                val gateAt=System.nanoTime()
+                NcmCarrierGate.await({carrierUp},{receivedFirstBlock},{checkOpen()},{System.nanoTime()/1000000},{Thread.sleep(25)})
+                checkOpen()
+                onDiagnostic("ncm carrier gate waitedMs=${(System.nanoTime()-gateAt)/1000000} carrier=$carrierUp inbound=$receivedFirstBlock profile=$startupProfile")
+                if(UsbStartupProfile.refreshFilter(startupProfile)&&carrierUp&&!receivedFirstBlock){
+                    val rc=NcmPacketFilter.configure(controlInterface){type,request,value,index,timeout -> connection.controlTransfer(type,request,value,index,null,0,timeout)}
+                    onDiagnostic("ncm carrier filter refresh result=$rc applied=${rc==0}")
+                }
+            }
+            val metrics=IntArray(6)
+            val queued=NativeUsb.startupWrite(fd,outEndpoint.address,block,15000,startupPending,metrics)
+            onDiagnostic("ncm startup queued result=$queued submitted=${metrics[0]} polls=${metrics[1]} durationMs=${metrics[2]} cancelled=${metrics[3]} actualBytes=${metrics[4]} urbStatus=${metrics[5]} inbound=$receivedFirstBlock linkUp=${linkUpAt!=0L}")
+            if(queued == -20001){
+                onDiagnostic("ncm startup queued unsupported before submit; synchronous fallback")
+                StartupUsbWrite.awaitReady(
+                    {budget->attempts++;NativeUsb.write(fd,outEndpoint.address,block,budget)},
+                    {checkOpen()},{!receivedFirstBlock},{System.nanoTime()/1000000},{Thread.sleep(25)})
+            }else if(queued == -125) -110 else queued
+        }
+        else if(waitForReady)StartupUsbWrite.awaitReady(
             {budget->attempts++;NativeUsb.write(fd,outEndpoint.address,block,budget)},
             {checkOpen()},{!receivedFirstBlock},{System.nanoTime()/1000000},{Thread.sleep(25)})
         else StartupUsbWrite.write(replayable,timeoutMillis,
             {budget->attempts++;NativeUsb.write(fd,outEndpoint.address,block,budget)},
-            {checkOpen()},{Thread.sleep(25)})}finally{NativeUsb.closeDescriptor(fd)}
+            {checkOpen()},{Thread.sleep(25)})
         if(attempts>1 && writeDiagnosticBudget>0){writeDiagnosticBudget--;onDiagnostic("NCM startup write attempts=$attempts result=$transferred durationMs=${(System.nanoTime()-at)/1000000} continuous=$waitForReady inbound=$receivedFirstBlock")}
         if(transferred<0&&transferred!=-110&&transferred!=-11)throw failSession("NCM native write errno=${-transferred}")
         // A timeout is not proof of detach. Preserve the native errno and let later packets retry.
@@ -91,9 +140,7 @@ class NcmUsbBridge internal constructor(
             return@synchronized
         }
         if (transferred != block.size) {
-            throw IphoneUsbException.DeviceUnavailable(
-                "NCM write transferred $transferred of ${block.size} bytes",
-            )
+            throw failSession("NCM write transferred $transferred of ${block.size} bytes")
         }
         if(!wroteFirstBlock){wroteFirstBlock=true;onDiagnostic("ncm first successful bulk-out bytes=$transferred durationMs=${(System.nanoTime()-at)/1000000}")}
         if (loggedWriteTimeout) {
@@ -108,6 +155,7 @@ class NcmUsbBridge internal constructor(
      */
     fun recv(timeoutMillis: Long): ByteArray? {
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
+        earlyReceive.handoff()
         synchronized(readLock) {
             checkOpen()
             if (frames.isNotEmpty()) return pollFrame()
@@ -128,13 +176,17 @@ class NcmUsbBridge internal constructor(
 
     override fun close() {
         statusRunning.set(false)
+        startupPending.set(false)
+        receivePending.set(false)
+        earlyReceive.handoff()
         synchronized(stateLock) { if(closed)return;closed=true }
         statusThread?.interrupt()
-        statusThread?.let { if(it!==Thread.currentThread())runCatching{it.join(STATUS_POLL_TIMEOUT_MILLIS+250L)} }
+        statusThread?.let { if(it!==Thread.currentThread())runCatching{it.join(750L)} }
         synchronized(readLock){synchronized(writeLock){
             for(usbInterface in claimedInterfaces.asReversed())runCatching{connection.releaseInterface(usbInterface)}
             connection.close()
         }}
+        earlyReceive.await()
         onDiagnostic("NCM closed native_reader_released=true")
     }
 
@@ -147,17 +199,23 @@ class NcmUsbBridge internal constructor(
             val transferred = try {
                 val fd=synchronized(stateLock){if(closed)return;NativeUsb.duplicate(connection.fileDescriptor)}
                 if(fd<0)return
-                try{NativeUsb.read(fd,endpoint.address,buffer,STATUS_POLL_TIMEOUT_MILLIS)}finally{NativeUsb.closeDescriptor(fd)}
+                try{NativeUsb.read(fd,endpoint.address,buffer,if(UsbStartupProfile.continuousStatus(startupProfile))500 else STATUS_POLL_TIMEOUT_MILLIS)}finally{NativeUsb.closeDescriptor(fd)}
             } catch (_: RuntimeException) {
                 return
             }
             if (transferred <= 0) {
                 try {
-                    Thread.sleep(STATUS_POLL_INTERVAL_MILLIS)
+                    Thread.sleep(if(UsbStartupProfile.continuousStatus(startupProfile))1 else STATUS_POLL_INTERVAL_MILLIS)
                 } catch (_: InterruptedException) {
                     return
                 }
                 continue
+            }
+            val connected=NcmLinkNotification.connected(buffer,transferred)
+            if(connected!=null){
+                carrierUp=connected
+                if(connected&&linkUpAt==0L)linkUpAt=System.nanoTime()
+                if(logBudget>0)onDiagnostic("ncm carrier connected=$connected ageMs=${(System.nanoTime()-openedAt)/1000000}")
             }
             if (logBudget > 0) {
                 logBudget--
@@ -217,12 +275,29 @@ class NcmUsbBridge internal constructor(
     }
 
     private fun readChunk(timeoutMillis: Long): Int? {
-        val fd=synchronized(stateLock){checkOpenLocked();NativeUsb.duplicate(connection.fileDescriptor)}
-        if(fd<0)throw failSession("NCM native dup errno=${-fd}")
-        val length=try{NativeUsb.read(fd,inEndpoint.address,readBuffer,timeoutMillis.coerceIn(1,500).toInt())}finally{NativeUsb.closeDescriptor(fd)}
-        if(length==0||length == -110)return null
+        // recv owns readLock for the whole transfer, including NTB reassembly.
+        checkOpen()
+        val tracing=!receivedFirstBlock
+        val begin=if(tracing)System.nanoTime()else 0L
+        if(tracing){initialReadCalls++;if(firstReadAt==0L){firstReadAt=begin;onDiagnostic("ncm first receive submitted ageMs=${(begin-openedAt)/1000000} profile=$startupProfile")}}
+        val length=if(UsbStartupProfile.queuedReceive(startupProfile)&&!queuedReceiveUsed){
+            check(!UsbStartupProfile.queued(startupProfile)){"Conflicting asynchronous USB completion owners"}
+            queuedReceiveUsed=true
+            val metrics=IntArray(6)
+            val n=NativeUsb.startupRead(ioDescriptor,inEndpoint.address,readBuffer,15000,receivePending,metrics)
+            onDiagnostic("ncm startup receive result=$n submitted=${metrics[0]} polls=${metrics[1]} durationMs=${metrics[2]} cancelled=${metrics[3]} actualBytes=${metrics[4]} urbStatus=${metrics[5]}")
+            if(n == -20001)NativeUsb.read(ioDescriptor,inEndpoint.address,readBuffer,500) else n
+        }else NativeUsb.read(ioDescriptor,inEndpoint.address,readBuffer,timeoutMillis.coerceIn(1,500).toInt())
+        if(tracing)readWaitMs+=(System.nanoTime()-begin)/1000000
+        if(length==0||length == -110){if(tracing)initialReadTimeouts++;return null}
         if(length<0)throw failSession("NCM native read errno=${-length}")
-        if(length>0)receivedFirstBlock=true
+        if(length>0&&!receivedFirstBlock){
+            onDiagnostic("ncm startup receive summary calls=$initialReadCalls timeouts=$initialReadTimeouts nativeWaitMs=$readWaitMs firstSubmitAgeMs=${(firstReadAt-openedAt)/1000000}")
+            receivedFirstBlock=true
+            startupPending.set(false)
+            val at=System.nanoTime();val link=linkUpAt
+            onDiagnostic("ncm first raw bulk-in bytes=$length ageMs=${(at-openedAt)/1000000} afterCarrierMs=${if(link==0L)-1 else (at-link)/1000000}")
+        }
         return length
     }
 
@@ -265,9 +340,12 @@ class NcmUsbBridge internal constructor(
         fun open(
             connection: UsbDeviceConnection,
             function: NcmFunctionDiscovery.NcmFunction,
+            profile: Int = 0,
+            probe: Boolean = false,
             onDiagnostic: (String) -> Unit = {},
         ): NcmUsbBridge {
             val claimed = ArrayList<UsbInterface>(2)
+            onDiagnostic("ncm endpoints control=${function.control.id} data=${function.data.id}/${function.data.alternateSetting} in=${function.bulkIn.address} out=${function.bulkOut.address} status=${function.statusIn?.address} maxPacketIn=${function.bulkIn.maxPacketSize} maxPacketOut=${function.bulkOut.maxPacketSize} startupProfile=$profile probe=$probe")
             try {
                 val descriptorHostMac = readNcmHostMac(connection, function.control.id)
                 Log.i(
@@ -304,23 +382,18 @@ class NcmUsbBridge internal constructor(
                     }
                     claimed.add(function.data)
                 }
-                val altSelected = connection.setInterface(function.data)
-                Log.i(
-                    IphoneCarPlayConfiguration.TAG,
-                    "setInterface iface=${function.data.id}/${function.data.alternateSetting} ok=$altSelected",
-                )
-                if (!altSelected) {
-                    throw IphoneUsbException.DeviceUnavailable(
-                        "Android could not select the NCM data alternate setting",
-                    )
-                }
-                // Initialize the optional CDC receive filter instead of inheriting stale firmware
-                // state across unplug/replug. A STALL/timeout falls back to the existing data path.
-                val filterStart=System.nanoTime()
-                val filterResult=NcmPacketFilter.configure(function.control.id){type,request,value,index,timeout ->
-                    connection.controlTransfer(type,request,value,index,null,0,timeout)
-                }
-                onDiagnostic("ncm packet filter value=14 result=$filterResult durationMs=${(System.nanoTime()-filterStart)/1000000} fallback=${filterResult!=0}")
+                NcmInitialization.activate(profile,
+                    reset={NativeUsb.alternate(connection.fileDescriptor,function.data.id,0)},
+                    probe={if(probe){
+                        val parameters=ByteArray(28)
+                        val n=connection.controlTransfer(0xa1,0x80,0,function.control.id,parameters,parameters.size,250)
+                        onDiagnostic("ncm parameters result=$n raw="+if(n>0)parameters.take(minOf(n,28)).joinToString(""){"%02x".format(it.toInt() and 255)}else "unavailable")
+                    }},
+                    select={connection.setInterface(function.data)},
+                    filter={NcmPacketFilter.configure(function.control.id){type,request,value,index,timeout ->
+                        connection.controlTransfer(type,request,value,index,null,0,timeout)
+                    }},
+                    log=onDiagnostic)
                 Log.i(
                     IphoneCarPlayConfiguration.TAG,
                     "ncm status endpoint=${function.statusIn?.address?.let { "0x${it.toString(16)}" } ?: "none"}",
@@ -332,6 +405,8 @@ class NcmUsbBridge internal constructor(
                     function.statusIn,
                     claimed,
                     descriptorHostMac,
+                    UsbStartupProfile.valid(profile),
+                    function.control.id,
                     onDiagnostic,
                 )
             } catch (error: Throwable) {

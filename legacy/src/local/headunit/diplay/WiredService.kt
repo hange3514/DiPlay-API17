@@ -3,6 +3,7 @@ package local.headunit.diplay
 import android.app.*
 import android.content.*
 import android.hardware.usb.*
+import android.media.AudioManager
 import android.net.VpnService
 import android.os.*
 import android.view.Surface
@@ -45,6 +46,29 @@ class WiredService:VpnService() {
   }
   @JvmStatic fun usbDiagnostic(message:String){live?.log("USB_NATIVE",message)}
   @JvmStatic fun consumeWheelDuplicate(key:Int):Boolean=live?.wheelControl?.duplicateAndroid(key)==true
+  @JvmStatic fun sendWheelKey(key:Int):Boolean=sendWheelKey(key,"unknown")
+  @JvmStatic fun sendWheelKey(key:Int,path:String):Boolean{
+   val owner=live?:return false
+   if(owner.closed){recordWheelEvent(owner,key,path,"service_closed",false);return false}
+   val current=owner.session?.takeIf{owner.videoReady&&!it.isClosed}
+   if(current==null){recordWheelEvent(owner,key,path,"no_active_session",false);return false}
+   if(CarPlayMediaButton.opensSiri(key)){try{current.invokeSiri();recordWheelEvent(owner,key,path,"siri_invoked",true);owner.log("WHEEL_KEY","keyevent voice_key siri_invoked");return true}catch(t:Throwable){recordWheelEvent(owner,key,path,"siri_send_failed",false);throw t}}
+   val index=CarPlayMediaButton.forKeyCode(key)?:run{recordWheelEvent(owner,key,path,"unmapped_key",false);return false}
+   if(WheelKeyPolicy.androidAction(key)!=0&&owner.wheelControl?.acceptAndroidKey(key)==false){recordWheelEvent(owner,key,path,"duplicate_suppressed",true);owner.log("WHEEL_KEY","keyevent key=$key suppressed_duplicate");return true}
+   val sent=current.sendMedia(index)
+   recordWheelEvent(owner,key,path,if(sent)"report_written" else "report_write_failed",sent,index)
+   owner.log("WHEEL_KEY","keyevent key=$key mediaIndex=$index sent=$sent")
+   return sent
+  }
+  private fun recordWheelEvent(owner:WiredService,key:Int,path:String,decision:String,handled:Boolean,mediaIndex:Int=-1){try{val row=JSONObject().put("keyPath",path).put("keyCode",key).put("keyDecision",decision).put("keyHandled",handled).put("keyIsSiriCandidate",CarPlayMediaButton.opensSiri(key)||CarPlayMediaButton.opensSiriWhileCarPlay(key));if(mediaIndex>=0)row.put("mediaIndex",mediaIndex);MainActivity.record(owner,"WHEEL_KEY",row)}catch(_:Throwable){}}
+  @JvmStatic fun adjustCarPlayVolume(direction:Int):Boolean{
+   val owner=live?:return false
+   if(owner.closed||!owner.videoReady)return false
+   val audio=owner.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+   audio.adjustStreamVolume(AudioManager.STREAM_MUSIC,direction,AudioManager.FLAG_SHOW_UI)
+   owner.log("WHEEL_KEY","volume direction=$direction stream="+AudioManager.STREAM_MUSIC)
+   return true
+  }
   @JvmStatic fun touch(action:Int,x:Float,y:Float){val owner=live?:return;if(owner.closed)return;TouchDispatch.submit(owner.input,owner.touchQueue,action){if(!owner.closed)runCatching{owner.session?.sendTouch(listOf(AirPlayContact(0,x.toDouble().coerceIn(0.0,1.0),y.toDouble().coerceIn(0.0,1.0),action!=1&&action!=3)))}}}
 
  }
@@ -58,8 +82,10 @@ class WiredService:VpnService() {
  private val startup=ConnectionTimings(bornAt)
  private var requestStartedAt=bornAt
  private var selectedFps=15
+ private var usbProfile=0
+ private var usbBatchId=""
  private var vpnWaitMs=0L
- private fun timingReport()=JSONObject(startup.snapshot(SystemClock.elapsedRealtime())).put("requestedFps",selectedFps).put("vpnWaitMs",vpnWaitMs).put("beforeServiceMs",(bornAt-requestStartedAt).coerceAtLeast(0))
+ private fun timingReport()=JSONObject(startup.snapshot(SystemClock.elapsedRealtime())).put("requestedFps",selectedFps).put("usbStartupProfile",usbProfile).put("usbBatchId",usbBatchId).put("vpnWaitMs",vpnWaitMs).put("beforeServiceMs",(bornAt-requestStartedAt).coerceAtLeast(0))
  private fun reportStartup(outcome:String){try{MainActivity.record(this,"CONNECT_SUMMARY",timingReport().put("outcome",outcome).put("connection",connectionId))}catch(_:Exception){}}
  private val failed=java.util.concurrent.atomic.AtomicBoolean(false)
  private val resourceLock=Any()
@@ -78,7 +104,6 @@ class WiredService:VpnService() {
  private val sessions=CopyOnWriteArrayList<AirPlaySession>()
  @Volatile private var server:ServerSocket?=null
  @Volatile private var sink:LegacyMedia?=null
- @Volatile private var bydAudioRoute:BydAudioRoute?=null
  @Volatile private var authorization=CountDownLatch(0)
  @Volatile private var authorizationDenied=false
  @Volatile private var videoReady=false
@@ -105,9 +130,11 @@ class WiredService:VpnService() {
   try{MainActivity.record(this,stage,JSONObject().put("detail",text.take(1200)).put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}}
  fun note(stage:String,text:String){if(stage=="FAILED")lastFailure=text;log(stage,text);sendBroadcast(Intent("local.headunit.diplay.STATUS").setPackage(packageName).putExtra("message",text).putExtra("stage",stage).putExtra("connection_id",connectionId))}
  private fun fail(e:Throwable){if(!closed&&failed.compareAndSet(false,true)){var cause:Throwable?=e;val chain=ArrayList<String>();while(cause!=null&&chain.size<4){chain.add(cause.javaClass.simpleName+": "+(cause.message?:"连接失败").take(160));cause=cause.cause};note("FAILED",chain.joinToString(" → "));shutdown()}}
- override fun onCreate(){super.onCreate();live=this;audioObserver=OemAudioObserver(this);wheelControl=WheelControl(this,object:WheelControl.Sink {override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&!it.isClosed};override fun send(token:Any,action:Int):Boolean {val current=this@WiredService.session;if(closed||current==null||current!==token||current.isClosed)return false;return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);else->false}}});usb=getSystemService(Context.USB_SERVICE) as UsbManager;host=IphoneUsbHost(this,usb,IphoneUsbMatcher.appleVendor(),onDiagnostic={log("USB",it)});handles.add(host.registerPermissionReceiver{authorizationDenied=it is IphoneUsbHost.PermissionResult.Denied;authorization.countDown()})}
+ override fun onCreate(){super.onCreate();live=this;audioObserver=OemAudioObserver(this);wheelControl=WheelControl(this,object:WheelControl.Sink {override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&!it.isClosed};override fun send(token:Any,action:Int):Boolean {val current=this@WiredService.session;if(closed||current==null||current!==token||current.isClosed)return false;return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);5->{current.invokeSiri();true};else->false}}});usb=getSystemService(Context.USB_SERVICE) as UsbManager;host=IphoneUsbHost(this,usb,IphoneUsbMatcher.appleVendor(),onDiagnostic={log("USB",it)});handles.add(host.registerPermissionReceiver{authorizationDenied=it is IphoneUsbHost.PermissionResult.Denied;authorization.countDown()});registerMediaButtonOwner()}
+ private fun registerMediaButtonOwner(){try{(getSystemService(Context.AUDIO_SERVICE) as AudioManager).registerMediaButtonEventReceiver(ComponentName(this,MediaButtonWheelReceiver::class.java));log("WHEEL_KEY","media_button_owner_registered")}catch(t:Throwable){log("WHEEL_KEY","media_button_owner_failed="+t.javaClass.simpleName)}}
+ private fun unregisterMediaButtonOwner(){try{(getSystemService(Context.AUDIO_SERVICE) as AudioManager).unregisterMediaButtonEventReceiver(ComponentName(this,MediaButtonWheelReceiver::class.java))}catch(_:Throwable){}}
  override fun onStartCommand(i:Intent?,flags:Int,id:Int):Int {
-  if(started)return START_NOT_STICKY;requestStartedAt=(i?.getLongExtra("request_started_at",bornAt)?:bornAt).takeIf{it in 1..bornAt}?:bornAt;vpnWaitMs=(i?.getLongExtra("vpn_wait_ms",0)?:0).coerceIn(0,(bornAt-requestStartedAt).coerceAtLeast(0));connectionId=i?.getStringExtra("connection_id").orEmpty();if(cleanupCount.get()>0||connectingWorkers.get()>0||MediaWorkers.busy()){note("FAILED","上一轮连接正在释放，请稍后重试");shutdown();return START_NOT_STICKY};started=true;selectedFps=PlaybackOptions.read(this);log("VIDEO_CONFIG","requestedFps=$selectedFps width=${ProjectionConfig.WIDTH} height=${ProjectionConfig.HEIGHT}");log("CONNECT_BUILD",runCatching{packageManager.getPackageInfo(packageName,0).versionName}.getOrDefault("unknown"));note("CONNECT_START","正在建立CarPlay连接")
+  if(started)return START_NOT_STICKY;usbBatchId=i?.getStringExtra("usb_batch_id").orEmpty().take(80);usbProfile=if(usbBatchId.isEmpty())UsbStartupProfile.DEFAULT else UsbStartupProfile.valid(i?.getIntExtra("usb_startup_profile",0)?:0);requestStartedAt=(i?.getLongExtra("request_started_at",bornAt)?:bornAt).takeIf{it in 1..bornAt}?:bornAt;vpnWaitMs=(i?.getLongExtra("vpn_wait_ms",0)?:0).coerceIn(0,(bornAt-requestStartedAt).coerceAtLeast(0));connectionId=i?.getStringExtra("connection_id").orEmpty();if(cleanupCount.get()>0||connectingWorkers.get()>0||MediaWorkers.busy()){note("FAILED","上一轮连接正在释放，请稍后重试");shutdown();return START_NOT_STICKY};started=true;selectedFps=PlaybackOptions.read(this);log("VIDEO_CONFIG","requestedFps=$selectedFps width=${ProjectionConfig.WIDTH} height=${ProjectionConfig.HEIGHT}");log("CONNECT_BUILD",runCatching{packageManager.getPackageInfo(packageName,0).versionName}.getOrDefault("unknown"));note("CONNECT_START","正在建立CarPlay连接")
   watchdog.schedule({if(!closed&&!videoReady&&sink?.receivedVideo!=true)fail(IOException("等待CarPlay画面超时，请提交日志"))},180,TimeUnit.SECONDS)
   val notification=Notification.Builder(this).setSmallIcon(android.R.drawable.stat_sys_upload).setContentTitle("DiPlay CarPlay").setContentText("正在连接，可在应用内停止").build();startForeground(1702,notification)
   try{work.execute{synchronized(resourceLock){if(closed)return@execute;connectingWorkers.incrementAndGet()};try{connect()}catch(e:Throwable){fail(e)}finally{connectingWorkers.decrementAndGet()}}}catch(e:Throwable){fail(e)};return START_NOT_STICKY
@@ -135,7 +162,7 @@ class WiredService:VpnService() {
  @Synchronized private fun phase(name:String){val now=SystemClock.elapsedRealtime();startup.advance(name,now);log("CONNECT_TIMING","completed=$previousPhase durationMs=${now-phaseAt} next=$name");phaseAt=now;previousPhase=name}
  private fun connect(){
   phase("usb_discovery")
-  val d=selectPhone();UsbPresenceLog.capture(this,"selected_phone");phase("usb_permission");authorize(d);check();phase("descriptors")
+  val d=selectPhone();UsbPresenceLog.recordTransition(this,"selected",d);UsbPresenceLog.capture(this,"selected_phone");phase("usb_permission");authorize(d);check();phase("descriptors")
   val initial=usb.openDevice(d)?:throw IOException("无法打开iPhone USB")
   val configs=try{LegacyUsb.read(d,initial)}finally{initial.close()}
   log("DESCRIPTORS",configs.joinToString { "config=${it.id}:"+IphoneCarPlayConfiguration.describe(it) })
@@ -157,7 +184,7 @@ class WiredService:VpnService() {
   val usbSession=us?:throw IOException("USBMUX打开失败");own(usbSession,"usbmux_usb")
   phase("ncm_open");val fn=NcmFunctionDiscovery.find(config)?:throw IOException("NCM功能缺失")
   val nc=usb.openDevice(phone)?:throw IOException("NCM USB打开失败")
-  val ncm=try{NcmUsbBridge.open(nc,fn,onDiagnostic={log("NCM",it)})}catch(e:Throwable){nc.close();throw e};own(ncm,"ncm_usb");usbLinked=true
+  val ncm=try{NcmUsbBridge.open(nc,fn,profile=usbProfile,probe=usbBatchId.isNotEmpty(),onDiagnostic={log("NCM",it)})}catch(e:Throwable){nc.close();throw e};own(ncm,"ncm_usb");ncm.startEarlyReceive();usbLinked=true
   phase("usbmux_handshake");val mux=Iap2UsbMuxHost.open(usbSession,onDiagnostic={log("MUX",it)});own(mux,"usbmux_host")
   phase("lockdown_pairing")
   val store=IdentityStore(this);val savedPair=store.loadPair();log("LOCKDOWN","saved_pair_present=${savedPair!=null} profile=2");note("PAIRING",if(savedPair!=null)"正在使用已保存的 iPhone 配对信息" else "首次配对，请保持 iPhone 解锁并确认信任");var pair=savedPair?:LockdownPairingClient(mux,onDiagnostic={log("LOCKDOWN",it)}).pair("DiPlay API17",store.hostId,store.buid,90000,isCancelled={closed}).pairRecord.also{store.savePair(it)}
@@ -170,7 +197,7 @@ class WiredService:VpnService() {
   phase("vpn_bridge");val tun=Builder().setSession("DiPlay USB link only").setMtu(1500).addAddress("fe80::2",64).addRoute("fe80::",64).establish()?:throw IOException("VPN网卡建立失败");own(Closeable{tun.close()},"vpn_descriptor");tunnel=tun;check();PlatformSupport.setNonBlocking(tun)
   val bridge=Ipv6NcmBridge(ncm,tun,mac,onDiagnostic={log("USB_NETWORK",it)}){fail(it)};own(bridge,"ipv6_bridge");bridge.start()
   phase("airplay_listener");val configAir=AirPlayConfig("DiPlay API17",macText,macText,"320.20",AirPlayDisplayConfig(ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,fps=selectedFps),microphone=true)
-  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,{log("MEDIA",it);if(!closed&&!videoReady&&it=="video_rendered_frames=1"){videoReady=true;startup.firstFrame(SystemClock.elapsedRealtime());reportStartup("first_frame");note("VIDEO_READY","已收到并解码CarPlay画面；按返回键显示控制面板");val route=BydAudioRoute(this);own(route,"byd_audio_route");bydAudioRoute=route;if(closed)route.close()else route.start()}});renderer.onVideoFailure={fail(IOException("视频解码失败",it))};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
+  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,{log("MEDIA",it);if(!closed&&!videoReady&&it=="video_rendered_frames=1"){videoReady=true;startup.firstFrame(SystemClock.elapsedRealtime());reportStartup("first_frame");note("VIDEO_READY","已收到并解码CarPlay画面；按返回键显示控制面板")}});renderer.onVideoFailure={fail(IOException("视频解码失败",it))};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
   val media=CarPlayMediaEngine(renderer,true);val pairings=store.pairings()
   val srv=ServerSocket();own(Closeable{srv.close()},"airplay_listener");srv.reuseAddress=true;srv.bind(InetSocketAddress(InetAddress.getByName("fe80::2"),7000));server=srv
   Thread({try{while(!closed){val socket=srv.accept();log("AIRPLAY_ACCEPT","control TCP accepted");if(!videoReady){phase("airplay_handshake");note("AIRPLAY_HANDSHAKE","投屏通道已连通，正在建立音视频会话")};try{socket.tcpNoDelay=true;socket.keepAlive=true;if(closed){socket.close();break};if(sessions.size>=4){socket.close();continue};val s=AirPlaySession(socket,configAir,identity,pairings,auth,listener,media);val accepted=synchronized(resourceLock){if(closed)false else{sessions.add(s);s.start();true}};if(!accepted)s.close()}catch(e:Throwable){runCatching{socket.close()};throw e}}}catch(e:Throwable){if(!closed)fail(e)}},"legacy-airplay").start()
@@ -190,7 +217,7 @@ class WiredService:VpnService() {
   val owned:List<Closeable>
   synchronized(resourceLock){if(closed)return;closed=true;owned=handles.toList();handles.clear();cleanupCount.incrementAndGet()}
   note("DISCONNECTED","CarPlay 已断开，正在释放连接");
-  reportStartup(if(videoReady)"released_after_video" else "ended_before_video");audioObserver?.close();wheelControl?.close();bydAudioRoute?.close();usbLinked=false;authorization.countDown();watchdog.shutdownNow();work.shutdownNow();input.shutdownNow()
+  reportStartup(if(videoReady)"released_after_video" else "ended_before_video");unregisterMediaButtonOwner();audioObserver?.close();wheelControl?.close();usbLinked=false;authorization.countDown();watchdog.shutdownNow();work.shutdownNow();input.shutdownNow()
   log("RELEASE_BEGIN","handles=${owned.size} sessions=${sessions.size}")
   val pending=java.util.concurrent.atomic.AtomicBoolean(true)
   Handler(Looper.getMainLooper()).postDelayed({if(pending.get()){log("RELEASE_TIMEOUT","cleanup still running after 12 seconds");for((thread,stack) in Thread.getAllStackTraces())if(thread.name.startsWith("legacy-")||thread.name.startsWith("api17-")||thread.name.startsWith("ncm-"))log("RELEASE_TIMEOUT","thread=${thread.name} state=${thread.state} at=${stack.take(5).joinToString()}")}},12000)

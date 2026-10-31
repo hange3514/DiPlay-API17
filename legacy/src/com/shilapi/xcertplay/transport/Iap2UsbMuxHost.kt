@@ -104,6 +104,10 @@ class Iap2UsbMuxHost private constructor(
         }
     }
 
+    internal fun reportTcpReceive(detail: String) {
+        runCatching { onDiagnostic(detail) }
+    }
+
     private fun begin() {
         val version = ByteArray(VERSION_MESSAGE_BYTES)
         putU32(version, 0, PROTOCOL_VERSION)
@@ -338,6 +342,7 @@ class Iap2UsbMuxTcpConnection internal constructor(
     private var connected = false
     private var closed = false
     private var failure: IphoneUsbException? = null
+    private var sequenceMismatchLogs = 0
 
     /** Sends [data] as an ordered byte stream, split into USBMUX TCP payloads of at most 16 KiB. */
     override fun send(data: ByteArray) {
@@ -496,26 +501,38 @@ class Iap2UsbMuxTcpConnection internal constructor(
             }
             return
         }
-        if (payload.isNotEmpty()) {
+        val fin = (flags and TCP_FIN) != 0
+        if (payload.isNotEmpty() || fin) {
+            var acceptedFin = false
+            var mismatch: UsbMuxTcpSequencePolicy.Mismatch? = null
+            var expected = 0
+            var shouldLog = false
             synchronized(stateLock) {
                 if (closed) return
-                nextAcknowledgement += payload.size
-                received.addLast(payload)
-                stateLock.notifyAll()
+                expected = nextAcknowledgement
+                val decision = UsbMuxTcpSequencePolicy.receive(expected, sequence, payload.size, fin)
+                mismatch = decision.mismatch
+                if (decision.accepted) {
+                    if (payload.isNotEmpty()) received.addLast(payload)
+                    nextAcknowledgement = decision.nextExpected
+                    acceptedFin = decision.acceptFin
+                    if (acceptedFin) closed = true
+                    stateLock.notifyAll()
+                } else {
+                    sequenceMismatchLogs++
+                    shouldLog = sequenceMismatchLogs <= MAX_SEQUENCE_MISMATCH_LOGS
+                }
             }
+            if (mismatch != null && shouldLog) {
+                host.reportTcpReceive(
+                    "usbmux_tcp_rx_sequence_mismatch kind=${mismatch!!.name.lowercase()} " +
+                        "expected=$expected received=$sequence payloadBytes=${payload.size} action=drop_and_ack",
+                )
+            }
+            // ACK only accepted bytes. For duplicates and gaps, repeat the current ACK so the
+            // phone can retransmit without poisoning the TLS byte stream with repeated ciphertext.
             sendControl(TCP_ACK)
-        }
-        if ((flags and TCP_FIN) != 0) {
-            synchronized(stateLock) {
-                if (closed) return
-                nextAcknowledgement += 1
-            }
-            sendControl(TCP_ACK)
-            synchronized(stateLock) {
-                closed = true
-                stateLock.notifyAll()
-            }
-            host.removeConnection(this)
+            if (acceptedFin) host.removeConnection(this)
         }
     }
 
@@ -542,6 +559,7 @@ class Iap2UsbMuxTcpConnection internal constructor(
         const val TCP_RST = 0x04
         const val TCP_ACK = 0x10
         const val MAX_SEND_PAYLOAD_BYTES = 16 * 1024
+        const val MAX_SEQUENCE_MISMATCH_LOGS = 8
         const val NANOS_PER_MILLISECOND = 1_000_000L
     }
 }

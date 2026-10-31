@@ -1,0 +1,8 @@
+DiPlay API17 v0.44.0-call-usb-key-evidence-beta application source snapshot.
+Contains application source, resources, native source, tests, and upstream experimental MFi identity assets used by the package.
+Private release automation, signing keystore/password, server credentials, logs, and OEM APKs are intentionally excluded.
+This archive is for source inspection; signing keys are not included.
+
+This diagnostic release retains the 0.43 ALSA/JNI evidence and adds timestamped Apple USB attach/detach snapshots (VID/PID, interface classes, USB speed/version and permission state, with no serial number or device path), structured wheel-key code/action/source/dispatch results, Apple USB attach/detach/interface/speed evidence, sanitized USBMUX/NCM failure summaries and phase timings, separate iPhone 12 and iPhone 15 Pro connection/call outcomes with optional iOS versions, and the voice-key result. Mixer snapshots are read-only; no mixer controls are changed.
+
+Raw microphone audio is not recorded or uploaded. USB serial numbers, UDID, MAC, phone number, and raw USB payloads are not collected. The capture inventory and audio-path evidence remain opt-in and are only transmitted with a user-submitted compatibility report. The only real-car baseline known before this release is BYD Song DM 2017 / MX9A0 / Android 4.2.2 (API 17) / iPhone 15 Pro Max / iOS 26.2.1; this release's new diagnostics have not been vehicle-verified.

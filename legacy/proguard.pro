@@ -14,6 +14,7 @@
 
 -keep class local.headunit.diplay.AutoUsbService { *; }
 -keep class local.headunit.diplay.AutoBootReceiver { *; }
+-keep class local.headunit.diplay.MediaButtonWheelReceiver { *; }
 
 # Stable production media boundary used by the separate emulator instrumentation APK.
 -keep class local.headunit.diplay.LegacyMedia { public *; }
@@ -27,7 +28,7 @@
 -keep class local.headunit.diplay.PlaybackFocus { public *; }
 -keep interface local.headunit.diplay.PlaybackFocus$Volume { *; }
 
--keep class local.headunit.diplay.BydAudioRoute { public *; }
+-keep class local.headunit.diplay.BydMultimediaCallRoute { public *; }
 
 -keep class local.headunit.diplay.BoundedPacketIo { public *; }
 -keep class local.headunit.diplay.PlatformSupport { public *; }
@@ -53,6 +54,7 @@
 -keep class com.shilapi.xcertplay.airplay.AirPlayCrypto { public *; }
 
 -keep class local.headunit.diplay.AudioRouting { public *; }
+-keep class local.headunit.diplay.OemAudioObserver { public *; }
 
 -keep class local.headunit.diplay.WheelProbe { *; }
 -keepclassmembers class local.headunit.diplay.PlaybackFocus { private android.media.AudioManager$OnAudioFocusChangeListener sessionListener; }
@@ -62,5 +64,14 @@
 
 -keep class local.headunit.diplay.RecorderNativeStart { public *; }
 
+-keep class local.headunit.diplay.AlsaProbe { *; }
+
 -keep class local.headunit.diplay.LegacyMedia$Microphone { public *; }
 -keep class com.shilapi.xcertplay.airplay.MicrophoneConfig { public *; }
+
+-keep class local.headunit.diplay.UsbBatchSequence { *; }
+-keep class local.headunit.diplay.UsbBatchReport { *; }
+-keep class local.headunit.diplay.UsbBatchCapture { *; }
+-keep class local.headunit.diplay.UsbBatchRunner { *; }
+
+-keep class local.headunit.diplay.SystemAudioHarvest { *; }

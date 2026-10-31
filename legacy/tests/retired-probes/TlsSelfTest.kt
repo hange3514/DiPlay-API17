@@ -36,6 +36,9 @@ object TlsSelfTest {
   server.enabledProtocols=arrayOf("TLSv1.2");server.needClientAuth=true;server.soTimeout=15000
   val executor=Executors.newSingleThreadExecutor();var accepted:SSLSocket?=null
   val future=executor.submit(Callable {val peer=server.accept() as SSLSocket;accepted=peer;try{val it=peer;it.soTimeout=15000;it.startHandshake();check(it.session.peerCertificates.isNotEmpty());val body=ByteArray(32768);var at=0;while(at<body.size){val n=it.inputStream.read(body,at,body.size-at);check(n>0);at+=n};it.outputStream.write(body);it.outputStream.flush()}finally{peer.close()};true})
+  LegacyTlsChannel.prepare(record)
+  LegacyTlsChannel.prepare(record)
+  check(LegacyTlsChannel.client(record)!==LegacyTlsChannel.client(record)){"Only immutable identity material may be cached, not TLS client state"}
   val socket=Socket();try{
    socket.connect(InetSocketAddress("127.0.0.1",server.localPort),5000)
    val wire=object:BlockingDuplexByteStream {override fun send(data:ByteArray){socket.outputStream.write(data);socket.outputStream.flush()};override fun recv(maxBytes:Int,timeoutMillis:Long):ByteArray?{socket.soTimeout=timeoutMillis.coerceIn(1,15000).toInt();val b=ByteArray(maxBytes);return try{val n=socket.inputStream.read(b);if(n<0)ByteArray(0)else b.copyOf(n)}catch(_:SocketTimeoutException){null}};override fun close(){socket.close()}}

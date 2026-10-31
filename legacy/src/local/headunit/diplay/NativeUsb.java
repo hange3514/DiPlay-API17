@@ -11,6 +11,8 @@ public final class NativeUsb {
  public static native void closeDescriptor(int fd);
  public static native int read(int fd,int endpoint,byte[] output,int timeout);
  public static native int write(int fd,int endpoint,byte[] input,int timeout);
+ public static native int startupWrite(int fd,int endpoint,byte[] input,int timeout,java.util.concurrent.atomic.AtomicBoolean keepWaiting,int[] metrics);
+ public static native int startupRead(int fd,int endpoint,byte[] output,int timeout,java.util.concurrent.atomic.AtomicBoolean keepWaiting,int[] metrics);
  public static native int pollRead(int fd,byte[] output,int timeout);
  public static native int pollWrite(int fd,byte[] input,int offset,int length,int timeout);
  private NativeUsb(){}
