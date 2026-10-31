@@ -1,40 +1,40 @@
-# DiPlay 0.42.0 auto-ALSA compatibility beta
+# DiPlay 0.42.0 自动 ALSA 麦克风路径适配测试版
 
-## Release status
+## 版本说明
 
-This is a compatibility test release, not a stable release. The latest stable wired baseline remains 0.40.0. No separate rollback APK is attached; earlier versions remain available from the GitHub Releases history.
+这是车型兼容测试版，不是稳定版。当前稳定有线基线仍为 0.40.0。本版不单独附带回退 APK，旧版本可从 [GitHub 历史 Releases](https://github.com/hange3514/DiPlay-API17/releases) 下载。
 
-The APK and the matching `DiPlay_API17_0.42.0_AutoALSA_Source.zip` source snapshot are attached to this GitHub release. This build increments the install version to 0.42.0 / versionCode 133. Its signing certificate matches 0.41.0, so it can be installed over that release; the 0.40.0 stable release remains unchanged.
+本发布页提供 APK 和对应的 `DiPlay_API17_0.42.0_AutoALSA_Source.zip` 源码快照。版本号为 0.42.0，versionCode 为 133。APK 签名与 0.41.0 相同，可覆盖安装 0.41.0；0.40.0 稳定版未修改。
 
-## What changed
+## 本版改动
 
-Earlier builds opened the fixed capture node `/dev/snd/pcmC1D0c`. This release discovers capture-capable PCM nodes from `/proc/asound/pcm` and `/dev/snd`, tries the previously verified MX9A0 node first, then probes other discovered nodes and common S16_LE rate/channel combinations. It records the last path that produced a measurable signal for the same local ALSA inventory and tries it first on later sessions. If a path returns three consecutive all-zero one-second windows, the client tries the next candidate.
+此前版本固定打开 `/dev/snd/pcmC1D0c`。本版会从 `/proc/asound/pcm` 和 `/dev/snd` 查找可采集的 PCM 节点，先尝试 MX9A0 上已验证过的节点，再探测其他发现的节点及常见 S16_LE 采样率/声道组合。同一套本机 ALSA 清单中，程序会记住最近一次采集到有效信号的路径，并在后续会话中优先尝试。如果某条路径连续三个 1 秒窗口都只有数字静音，程序会继续尝试下一个候选节点。
 
-The client does not write ALSA mixer controls. If no direct ALSA capture stream can be opened, it records the reason and uses Android `AudioRecord` as a fallback. A node that opens but produces no signal after all alternatives have been tried is kept as the selected path and reported for diagnosis; the app does not claim that opening a node proves that the vehicle microphone is routed to it.
+程序不会写入 ALSA mixer 控件。如果没有任何 ALSA 采集节点能够打开，程序会记录原因并回退到 Android `AudioRecord`。如果节点能打开但所有候选路径都没有采到信号，程序会保留并报告当前路径供分析；仅仅成功打开节点并不能证明它已连接到车载麦克风。
 
-## Diagnostic data
+## 诊断信息与隐私
 
-The ordinary diagnostic upload includes:
+用户主动提交兼容性报告时，报告会包含：
 
-- Android audio board/model fields already used for compatibility grouping.
-- `/proc/asound/cards`, `/proc/asound/pcm`, and the visible `/dev/snd` node names and read/write availability.
-- Candidate paths, open success/failure, requested and negotiated rate/channel, selected path, switches, and explicit `AudioRecord` fallback reasons.
-- One-second microphone signal measurements such as peak and mean absolute sample value. These are numeric measurements only; the app does not store or upload raw microphone audio.
+- 用于兼容性分组的 Android 主板、设备型号等字段。
+- `/proc/asound/cards`、`/proc/asound/pcm` 内容，以及可见的 `/dev/snd` 节点名称和读写权限。
+- 候选采集路径、打开结果、请求及协商后的采样率/声道、最终选择路径、切换记录和 `AudioRecord` 回退原因。
+- 短时麦克风信号的峰值与平均绝对幅度等数值统计。
 
-The server validates and stores these ALSA fields in the normal compatibility report with the existing 24-hour retention. The app shows the expanded upload disclosure once after installing this version.
+这些 ALSA 信息会经过服务端字段校验，并按现有规则保留 24 小时。安装本版后，首次打开车型兼容功能会重新显示扩展后的上传说明。应用不会保存或上传原始麦克风音频。
 
-The environment report only enumerates system files and nodes. It does not open a capture stream, allocate an audio device, or change mixer controls. The purpose is to distinguish missing nodes, permission denial, unsupported PCM formats, and an opened-but-silent capture path in one report.
+环境信息仅枚举系统文件和设备节点，不会打开采集流、占用音频设备或修改 mixer。报告用于区分节点缺失、权限不足、PCM 格式不支持，以及节点打开但没有采到信号等情况。
 
-## Test scope and limits
+## 实测范围与限制
 
-The existing real-car record is limited to a BYD Song DM 2017 with an MX9A0 head unit, Android 4.2.2 / API 17, and an iPhone 15 Pro Max running iOS 26.2.1. The 0.40.0 wired behavior was confirmed on that combination. The 0.42.0 dynamic path selection has not yet been verified in a vehicle, and no other car/head-unit model has been tested.
+已有实车记录仅覆盖比亚迪宋 DM 2017 款、MX9A0 车机、Android 4.2.2 / API 17，以及运行 iOS 26.2.1 的 iPhone 15 Pro Max。0.40.0 有线功能已在这套组合上确认；0.42.0 的动态路径选择尚未在车上验证，也没有在其他车型或车机上测试。
 
-Dynamic node discovery reduces assumptions about card/device numbering. It cannot bypass a system that denies ordinary apps access to `/dev/snd`, expose a microphone that the kernel/HAL does not publish, or guarantee that an opened node is physically connected to the vehicle microphone. The system `AudioRecord` fallback may follow the head unit's normal audio policy.
+动态发现节点可以减少对声卡编号和设备编号的假设，但无法绕过系统对普通应用的 `/dev/snd` 访问限制，无法发现内核或 HAL 未公开的麦克风节点，也不能保证已打开的节点实际连到车载麦克风。`AudioRecord` 回退仍会受车机 Android 音频策略影响。
 
-## Suggested single vehicle test
+## 建议的一次车上测试
 
-1. Install 0.42.0 and connect the phone as usual.
-2. Make one short test call. Speak for several seconds and separately note whether the vehicle microphone reaches the other party and whether incoming audio is audible on the car speakers.
-3. Submit the normal compatibility/environment report after the call. The report will include the candidate scan and measured capture path without attaching a recording.
+1. 安装 0.42.0 并照常连接手机。
+2. 做一次简短通话，说几句话；分别留意对方是否能听到车机麦克风，以及车机扬声器是否能听到来话。
+3. 通话后提交一次“车型兼容”报告。报告会带上候选节点探测和采集路径信息，不会附带录音。
 
-Do not test while driving. Stop the projection before changing or uninstalling versions.
+请勿在驾驶时测试。切换或卸载版本前先停止投屏。
