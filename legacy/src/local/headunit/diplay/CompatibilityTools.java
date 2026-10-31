@@ -39,7 +39,7 @@ import org.json.JSONObject;
 final class CompatibilityTools {
     private static final String API = "http://next.hzy.cloud:20001/diplay/v1";
     private static final String PREFS = "diplay_compatibility";
-    private static final String CONSENT_VERSION = "0.44.0-call-usb-key-evidence-beta";
+    private static final String CONSENT_VERSION = "0.44.1-call-usb-key-evidence-beta";
     private static final int MAX_APK = 20 * 1024 * 1024;
     private static final Pattern SAFE_TOKEN = Pattern.compile("[A-Za-z0-9_.:/-]{1,48}");
     private static final Pattern SAFE_ALSA_PATH = Pattern.compile("/dev/snd/pcmC[0-9]{1,3}D[0-9]{1,3}c");
@@ -61,7 +61,7 @@ final class CompatibilityTools {
         "bluetoothA2dp", "wiredHeadset", "microphoneMuted", "nativeProbeLoaded", "candidateListTruncated",
         "readOnly", "snapshotTruncated", "keyHandled", "keyIsSiriCandidate", "devicePermission", "usbSysfsReadable"
     );
-    private static final Set<String> ENUM_FIELDS = set("stage", "phase", "outcome", "status", "reason", "strategy", "eventType", "keyDecision", "keyPath", "usbTransition", "diagnosticCode", "result");
+    private static final Set<String> ENUM_FIELDS = set("stage", "phase", "outcome", "status", "reason", "strategy", "eventType", "keyDecision", "keyPath", "usbTransition", "usbVersion", "diagnosticCode", "result");
     private static final Set<String> ALSA_PATH_FIELDS = set("devicePath", "selectedPath", "retainedPath", "fromPath", "toPath", "rememberedPath");
     private static final Set<String> ALSA_SUMMARY_FIELDS = set("candidateSummary", "attemptSummary", "alsaCardsSummary", "alsaPcmSummary", "mixerSnapshot", "usbInterfaceSummary", "diagnosticSummary");
     private static final Set<String> ALSA_TOKEN_FIELDS = set("profileKey", "source", "audioType", "result", "fallbackTarget", "stage", "phase");
