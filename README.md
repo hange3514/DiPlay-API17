@@ -2,6 +2,8 @@
 
 > **当前发布版：0.40.0（2026-10-30）**。下载 [DiPlay API17 v0.40.0 Release](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.40.0-api17)，完整变化、实测范围、SHA-256 和授权操作见 [发布说明](docs/RELEASE_0.40.0.md)。同页附带 0.34 有线稳定回退包。
 
+> **兼容框架测试版：0.41.0-framework-beta** 已在私人更新通道按车机环境筛选，不公开 APK。首次启用需手动安装一次；版本历史、旧版安装步骤和日志采集范围见 [车型兼容测试说明](docs/COMPATIBILITY_TESTING.md)与[0.41.0 发布说明](docs/RELEASE_0.41.0_FRAMEWORK_BETA.md)。以后通过版本历史下载旧包，不再每个测试版重复附一份回退包。
+
 > 车主反馈 0.40.0 的 CarPlay 通话声音问题已解决；实车测试仅覆盖下文列出的比亚迪宋 DM 2017 款 MX9A0 与 iPhone 15 Pro Max / iOS 26.2.1，未在其他设备验证。
 
 > 下文对 0.34.1-public 的说明作为历史发布记录保留；当前下载和版本信息以 0.40.0 发布页及发布说明为准。
@@ -10,7 +12,7 @@
 
 **只在下述一套真实车辆和手机组合上测试过，没有在其他车型、车机、手机或 iOS 版本上测试过。不代表通用兼容，也不保证安装后即可连接。** 本仓库不是 Apple 或比亚迪官方产品，没有宣称 MFi/CarPlay 认证。
 
-当前 0.40.0 APK 与回退包见 GitHub Release；0.34.1-public 是历史公开精简版。项目来源及许可证信息见下文。
+当前公开 APK 仍为 0.40.0；0.34.1-public 是历史公开精简版。0.41.0 测试 APK 不公开下载，只向匹配车机环境的客户端提供。项目来源及许可证信息见下文。
 
 ## 上游来源与许可证
 
@@ -47,7 +49,7 @@
 - 精简连接界面，移除方向盘检测入口、帧率调试提示及自动确认适配提示；替换启动图标。
 - 分拆启动阶段与耗时记录，区分身份认证、手机端就绪、网络握手和首帧等待，避免把所有等待误认为认证耗时。
 
-详细验证范围和限制见 [docs/TESTING.md](docs/TESTING.md)，版本摘要见 [CHANGELOG.md](CHANGELOG.md)。
+详细验证范围和限制见 [docs/TESTING.md](docs/TESTING.md)，版本摘要见 [CHANGELOG.md](CHANGELOG.md)。车型自动分组、版本历史、隐私披露和日志保留方式见 [docs/COMPATIBILITY_TESTING.md](docs/COMPATIBILITY_TESTING.md)。
 
 ## 当前维护状态：0.40.0 有线版
 
