@@ -2,7 +2,7 @@
 
 > **当前发布版：0.40.0（2026-10-30）**。下载 [DiPlay API17 v0.40.0 Release](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.40.0-api17)，完整变化、实测范围、SHA-256 和授权操作见 [发布说明](docs/RELEASE_0.40.0.md)。同页附带 0.34 有线稳定回退包。
 
-> **车型兼容框架公开预览：0.41.0-framework-beta** APK 已附在 GitHub 预发布页，作为其他车机安装“车型兼容”入口的基础版本；它不是稳定版，也不代表其他车型已兼容。以后针对具体车机的实验更新仍会按环境筛选。版本历史、安装步骤和日志采集范围见[车型兼容测试说明](docs/COMPATIBILITY_TESTING.md)与[0.41.0 发布说明](docs/RELEASE_0.41.0_FRAMEWORK_BETA.md)。旧版通过版本历史下载，不再每个测试版重复附一份回退包。
+> **车型兼容框架测试版：0.42.0-auto-alsa-beta** APK 与匹配源码快照附在 GitHub Release。此版本尝试自动发现 ALSA 麦克风采集节点并把候选路径、格式协商和采样证据放入诊断报告；它不是稳定版，也未在车上验证这项自动选择。其他车型仍未实测。版本历史、安装步骤和日志采集范围见[车型兼容测试说明](docs/COMPATIBILITY_TESTING.md)与[0.42.0 发布说明](docs/RELEASE_0.42.0_AUTO_ALSA.md)。旧版通过历史 Releases 下载，不再每个测试版附回退包。
 
 > 车主反馈 0.40.0 的 CarPlay 通话声音问题已解决；实车测试仅覆盖下文列出的比亚迪宋 DM 2017 款 MX9A0 与 iPhone 15 Pro Max / iOS 26.2.1，未在其他设备验证。
 
@@ -12,7 +12,7 @@
 
 **只在下述一套真实车辆和手机组合上测试过，没有在其他车型、车机、手机或 iOS 版本上测试过。不代表通用兼容，也不保证安装后即可连接。** 本仓库不是 Apple 或比亚迪官方产品，没有宣称 MFi/CarPlay 认证。
 
-0.40.0 仍是最新稳定公开版，0.34.1-public 是历史公开精简版。0.41.0 作为公开预览 APK 提供兼容入口；后续车型专属测试包由私人更新目录按环境筛选。项目来源及许可证信息见下文。
+0.40.0 仍是最新稳定公开版，0.34.1-public 是历史公开精简版。0.42.0 是兼容性测试版，后续版本按 GitHub Releases 发布；项目来源及许可证信息见下文。
 
 ## 上游来源与许可证
 
@@ -76,7 +76,7 @@
 
 ## 下载、安装与授权
 
-**最新稳定版为 0.40.0。** 在 [GitHub Release](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.40.0-api17) 下载稳定版和 0.34 有线基线。兼容框架公开预览 APK 0.41.0 位于 [预发布页](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.41.0-framework-beta)；它提供兼容入口，不是已验证的通用稳定版。实测范围和授权步骤见各自发布说明。
+**最新稳定版为 0.40.0。** 在 [GitHub Release](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.40.0-api17) 下载稳定版。0.42.0 自动 ALSA 路径适配测试版位于 [GitHub 预发布页](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.42.0-auto-alsa-beta)；它仍是实验版，只有旧版 0.40.0 路径在 MX9A0 上有实车验证。实测范围和授权步骤见各自发布说明。
 
 - 0.40.0：有线 CarPlay，1024×600 / 15 fps；界面仅保留连接和停止。此公开版不包含在线更新、日志提交或环境检测入口。
 - 0.34 回退包：同页附件 DiPlay_API17_Stable034.apk。切换版本可能需要系统确认；请先停止连接再安装。
