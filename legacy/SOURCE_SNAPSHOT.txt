@@ -1,6 +1,6 @@
-DiPlay API17 source snapshot for version 0.44.49-usb-reattach-focus-beta (versionCode 184).
+﻿DiPlay API17 source snapshot for version 0.44.49-usb-reattach-focus-beta (versionCode 184).
 Based on shihabal3amri/DiPlay under GPL-3.0; includes the 0.44.49 application and native lwIP sources.
 This snapshot omits generated build outputs, signing keys, server credentials, and offline MFi identity files.
 The matching APK and SHA-256 are published on GitHub Release v0.44.49-usb-reattach-focus-beta.
 The APK retains the upstream-derived offline attachment identity documented in docs/AUTH_PROVENANCE.md.
-Exact real-car behavior for 0.44.49 has not yet been verified.
+Version 0.44.49 was tested in the maintainer vehicle (BYD Song DM 2017 / MX9A0); the user reported no issues. Other vehicle models have not been tested.
