@@ -6,6 +6,26 @@ import org.junit.Test
 
 class NtbAllocationBoundsTest {
  private fun u16(bytes:ByteArray,offset:Int,value:Int){bytes[offset]=value.toByte();bytes[offset+1]=(value ushr 8).toByte()}
+ private fun u16(bytes:ByteArray,offset:Int)= (bytes[offset].toInt() and 255) or ((bytes[offset+1].toInt() and 255) shl 8)
+ @Test fun rangeBuildMatchesCopiedFrameAndPadsBoundaryWithOneAllocation(){
+  val source=ByteArray(510){(it*7).toByte()};val expected=Ntb16Codec.build(source.copyOfRange(13,497),9)
+  val actual=Ntb16Codec.build(source,13,484,9)
+  assertArrayEquals(expected,actual);assertEquals(513,actual.size);assertEquals(512,u16(actual,8))
+ }
+ @Test fun rangeBuilderMatchesReferenceAcrossLengthFieldAndUsbBoundaries(){
+  for((index,length) in listOf(1,57,483,484,485,995,996,997,1500,1501,65507).withIndex()){
+   val source=ByteArray(length+19){((it*31+index) and 255).toByte()};val offset=11
+   val reference=Ntb16Codec.build(source.copyOfRange(offset,offset+length),index)
+   val optimized=Ntb16Codec.build(source,offset,length,index)
+   assertArrayEquals("length=$length",reference,optimized);assertEquals(28+length,u16(optimized,8))
+  }
+ }
+ @Test fun rangeBuildRejectsInvalidBounds(){
+  val source=ByteArray(100)
+  for((offset,length) in listOf(-1 to 60,0 to 0,50 to 60,0 to -1)){
+   try{Ntb16Codec.build(source,offset,length,1);fail("accepted invalid range $offset/$length")}catch(_:IllegalArgumentException){}
+  }
+ }
  @Test fun cyclicTableDoesNotDuplicateTheSameFrame(){
   val frame=ByteArray(1500){it.toByte()};val block=Ntb16Codec.build(frame,1)
   u16(block,18,12)

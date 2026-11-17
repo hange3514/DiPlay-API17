@@ -51,24 +51,26 @@ class IapTunnel(
         } else {
             InetAddress.getByName("::")
         }
-        val secondary = ServerSocket()
-        runCatching {
-            secondary.apply {
-                reuseAddress = true
-                bind(InetSocketAddress(secondaryAddress, bound.localPort))
+        if (!local.headunit.diplay.LegacySockets.isUserlandActive()) {
+            val secondary = ServerSocket()
+            runCatching {
+                secondary.apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(secondaryAddress, bound.localPort))
+                }
+            }.onSuccess { secondary ->
+                servers += secondary
+                listener.onDebug(
+                    "AirPlay iAP tunnel secondary listener bound=" +
+                        "${secondary.localSocketAddress}",
+                )
+            }.onFailure { error ->
+                safeClose(secondary)
+                listener.onDebug(
+                    "AirPlay iAP tunnel secondary listener failed address=" +
+                        "$secondaryAddress port=${bound.localPort}: ${error.message}",
+                )
             }
-        }.onSuccess { secondary ->
-            servers += secondary
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener bound=" +
-                    "${secondary.localSocketAddress}",
-            )
-        }.onFailure { error ->
-            safeClose(secondary)
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener failed address=" +
-                    "$secondaryAddress port=${bound.localPort}: ${error.message}",
-            )
         }
         servers.forEach { server ->
             threads += Thread({ accept(server) }, "airplay-iap-tunnel").apply {

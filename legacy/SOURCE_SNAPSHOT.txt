@@ -1,3 +1,6 @@
-DiPlay API17 v0.44.1-call-usb-key-evidence-beta source snapshot.
-Contains application source, resources, native source and tests. Private server configuration, signing credentials, offline MFi identity assets and APK binaries are excluded from the public source.
-See docs/CONFIGURATION.md for local build configuration requirements.
+DiPlay API17 source snapshot for version 0.44.49-usb-reattach-focus-beta (versionCode 184).
+Based on shihabal3amri/DiPlay under GPL-3.0; includes the 0.44.49 application and native lwIP sources.
+This snapshot omits generated build outputs, signing keys, server credentials, and offline MFi identity files.
+The matching APK and SHA-256 are published on GitHub Release v0.44.49-usb-reattach-focus-beta.
+The APK retains the upstream-derived offline attachment identity documented in docs/AUTH_PROVENANCE.md.
+Exact real-car behavior for 0.44.49 has not yet been verified.

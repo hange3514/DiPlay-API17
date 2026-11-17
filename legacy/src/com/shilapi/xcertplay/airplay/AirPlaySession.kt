@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import android.util.Log
+import com.shilapi.xcertplay.compat.Base64Compat
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import java.io.BufferedInputStream
@@ -23,6 +24,30 @@ data class AirPlayDeviceInfo(
     val model: String,
 )
 
+/** Bounded evidence for a request whose AirPlay handler threw before producing a response. */
+data class AirPlayFailureEvidence(
+    val method: String,
+    val path: String,
+    val pathTruncated: Boolean,
+    val protocol: String,
+    val headersJson: String,
+    val headersTruncated: Boolean,
+    val bodyBase64: String,
+    val bodyBytes: Int,
+    val bodyCapturedBytes: Int,
+    val bodyTruncated: Boolean,
+    val errorRaw: String,
+    val errorTruncated: Boolean,
+    val stackTraceRaw: String,
+    val stackTraceTruncated: Boolean,
+    val peerName: String,
+    val peerDeviceId: String,
+    val peerWifiMac: String,
+    val peerModel: String,
+    val peerOsVersion: String,
+    val peerSourceVersion: String,
+)
+
 /** Session lifecycle and command callbacks for the driver/UI layer. */
 interface AirPlaySessionListener {
     fun onTcpAccepted(event: AirPlayTcpAccepted) {}
@@ -31,6 +56,7 @@ interface AirPlaySessionListener {
     fun onVideoFrameRendered(session: AirPlaySession) {}
     fun onTransportError(message: String) {}
     fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) {}
+    fun onProtocolFailure(session: AirPlaySession, evidence: AirPlayFailureEvidence) {}
     fun onHostUiRequested(session: AirPlaySession) {}
     fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) {}
     /** Video in car: a playback message on a remote control session (X-Apple-StreamID). */
@@ -79,6 +105,11 @@ class AirPlaySession(
     internal var cipher: ControlCipher? = null
     internal var encBuf = ByteArray(0)
     internal var deviceBtMac = ""
+    @Volatile private var peerName = ""
+    @Volatile private var peerWifiMac = ""
+    @Volatile private var peerModel = ""
+    @Volatile private var peerOsVersion = ""
+    @Volatile private var peerSourceVersion = ""
     internal val activeStreams = linkedSetOf<Int>()
 
     /** Counts the iPhone's cluster stream setups; 0 while no cluster stream is up. */
@@ -92,6 +123,7 @@ class AirPlaySession(
         private set
     internal val isClosed: Boolean get() = closed.get()
     private val notified = AtomicBoolean(false)
+    private val failureEvidenceLogged = AtomicBoolean(false)
     private var eventServer: ServerSocket? = null
     private var eventSocket: Socket? = null
     private var eventCipher: ControlCipher? = null
@@ -490,6 +522,14 @@ class AirPlaySession(
                         handle(request)
                     } catch (error: Exception) {
                         protocolFailure = "${request.method}: ${error.javaClass.simpleName}: ${error.message?.take(160)}"
+                        if (failureEvidenceLogged.compareAndSet(false, true)) {
+                            try {
+                                listener.onProtocolFailure(this, failureEvidence(request, error))
+                            } catch (captureError: Throwable) {
+                                Log.w(TAG, "airplay failure evidence callback failed", captureError)
+                            }
+                        }
+                        debugLog(AirPlayControlDiagnostics.failure(request.method, request.path, error), false)
                         debugLog("airplay handler failed method=${request.method} error=${error.javaClass.simpleName}: ${error.message} at=${error.stackTrace.take(4).joinToString()}")
                         Log.e(
                             TAG,
@@ -655,6 +695,11 @@ class AirPlaySession(
         val deviceId = string(dict["deviceID"])
         val wifiMac = string(dict["macAddress"]).lowercase()
         val model = string(dict["model"])
+        peerName = name.take(128)
+        peerWifiMac = wifiMac.take(128)
+        peerModel = model.take(128)
+        peerOsVersion = string(dict["osVersion"]).take(64)
+        peerSourceVersion = string(dict["sourceVersion"]).take(64)
         debugLog(AirPlayPeerDiagnostics.summary(model, string(dict["osVersion"]), string(dict["sourceVersion"])))
         if (deviceId.isNotEmpty()) deviceBtMac = deviceId
         if (name.isNotEmpty() || deviceId.isNotEmpty() || wifiMac.isNotEmpty()) {
@@ -736,6 +781,71 @@ class AirPlaySession(
             }
         }
         return result
+    }
+
+    private fun failureEvidence(request: RtspMessage.Request, error: Throwable): AirPlayFailureEvidence {
+        val maxBodyBytes = 8192
+        val capturedBody = request.body.copyOfRange(0, minOf(request.body.size, maxBodyBytes))
+        val headers = boundedHeadersJson(request.headers, 4096)
+        val stackWriter = java.io.StringWriter()
+        error.printStackTrace(java.io.PrintWriter(stackWriter))
+        val rawStack = stackWriter.toString()
+        val stack = rawStack.take(6144)
+        val rawError = error.toString()
+        return AirPlayFailureEvidence(
+            method = request.method.take(32),
+            path = request.path.take(1024),
+            pathTruncated = request.path.length > 1024,
+            protocol = request.protocol.take(32),
+            headersJson = headers.first,
+            headersTruncated = headers.second,
+            bodyBase64 = Base64Compat.encode(capturedBody),
+            bodyBytes = request.body.size,
+            bodyCapturedBytes = capturedBody.size,
+            bodyTruncated = capturedBody.size != request.body.size,
+            errorRaw = rawError.take(2048),
+            errorTruncated = rawError.length > 2048,
+            stackTraceRaw = stack,
+            stackTraceTruncated = rawStack.length > 6144,
+            peerName = peerName,
+            peerDeviceId = deviceBtMac.take(256),
+            peerWifiMac = peerWifiMac,
+            peerModel = peerModel,
+            peerOsVersion = peerOsVersion,
+            peerSourceVersion = peerSourceVersion,
+        )
+    }
+
+    private fun boundedHeadersJson(headers: Map<String, String>, maxChars: Int): Pair<String, Boolean> {
+        val out = StringBuilder("{")
+        var truncated = false
+        for ((key, value) in headers.toSortedMap()) {
+            val pair = "${jsonString(key)}:${jsonString(value)}"
+            val extra = pair.length + if (out.length > 1) 1 else 0
+            if (out.length + extra + 1 > maxChars) {
+                truncated = true
+                break
+            }
+            if (out.length > 1) out.append(',')
+            out.append(pair)
+        }
+        out.append('}')
+        return out.toString() to truncated
+    }
+
+    private fun jsonString(value: String): String = buildString(value.length + 2) {
+        append('"')
+        for (char in value) when (char) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\b' -> append("\\b")
+            '\u000c' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (char < ' ') append("\\u%04x".format(char.toInt())) else append(char)
+        }
+        append('"')
     }
 
     private fun handleCommand(request: RtspMessage.Request): RtspMessage.Response {

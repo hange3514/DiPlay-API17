@@ -19,6 +19,11 @@ import java.util.ArrayDeque
 class Iap2LinkEngine(
     private val config: Iap2LinkConfig = Iap2LinkConfig(),
 ) {
+    internal data class OutputBatch(
+        val bytes: ByteArray,
+        val completedFlushReceipts: List<Iap2TransportFlushReceipt>,
+    )
+
     enum class State {
         IDLE,
         DETECTING,
@@ -119,6 +124,7 @@ class Iap2LinkEngine(
         val payload: ByteArray,
         var retransmissions: Int = 0,
         var deadlineMillis: Long = 0,
+        val flushReceipt: Iap2TransportFlushReceipt? = null,
     )
 
     private var state = State.IDLE
@@ -136,6 +142,7 @@ class Iap2LinkEngine(
     private val outOfOrder = ArrayList<Packet>()
     private val events = ArrayDeque<Event>()
     private val output = ByteArrayOutputStream()
+    private val outputFlushReceipts = ArrayList<Iap2TransportFlushReceipt>()
     private val receive = ReceiveBuffer()
     private var awaitingPayload: Header? = null
 
@@ -151,9 +158,16 @@ class Iap2LinkEngine(
     fun peerSynchronization(): SynchronizationPayload = peerSynchronization
 
     fun takeOutput(): ByteArray {
+        return takeOutputBatch().bytes
+    }
+
+    /** Takes queued bytes and only the receipts for tracked data frames included in those bytes. */
+    internal fun takeOutputBatch(): OutputBatch {
         val bytes = output.toByteArray()
         output.reset()
-        return bytes
+        val receipts = outputFlushReceipts.toList()
+        outputFlushReceipts.clear()
+        return OutputBatch(bytes, receipts)
     }
 
     fun pollEvent(): Event? = if (events.isEmpty()) null else events.removeFirst()
@@ -249,6 +263,25 @@ class Iap2LinkEngine(
 
     /** Queues one raw payload on a negotiated iAP2 session. */
     fun sendSession(sessionId: Int, bytes: ByteArray, nowMillis: Long) {
+        sendSession(sessionId, bytes, nowMillis, flushReceipt = null)
+    }
+
+    /** Queues one session payload whose receipt travels with its exact iAP2 data frame. */
+    internal fun sendSessionTracked(
+        sessionId: Int,
+        bytes: ByteArray,
+        nowMillis: Long,
+        flushReceipt: Iap2TransportFlushReceipt,
+    ) {
+        sendSession(sessionId, bytes, nowMillis, flushReceipt)
+    }
+
+    private fun sendSession(
+        sessionId: Int,
+        bytes: ByteArray,
+        nowMillis: Long,
+        flushReceipt: Iap2TransportFlushReceipt?,
+    ) {
         require(sessionId in 0..0xff) { "iAP2 session id must fit in one byte" }
         require(bytes.size <= MAX_PAYLOAD_BYTES) {
             "iAP2 session payload exceeds $MAX_PAYLOAD_BYTES bytes"
@@ -258,7 +291,7 @@ class Iap2LinkEngine(
                 "iAP2 session payload exceeds peer maxLength ${peerSynchronization.maxLength}"
             }
         }
-        sendPacket(Packet(0, sessionId, bytes.copyOf()), nowMillis)
+        sendPacket(Packet(0, sessionId, bytes.copyOf(), flushReceipt = flushReceipt), nowMillis)
     }
 
     private fun parseAvailable(nowMillis: Long): Boolean {
@@ -399,7 +432,7 @@ class Iap2LinkEngine(
                 die("iAP2 packet ${packet.sequence} was not acknowledged")
                 return
             }
-            sendData(packet.sequence, packet.sessionId, packet.payload)
+            sendData(packet.sequence, packet.sessionId, packet.payload, packet.flushReceipt)
             sendAcknowledgementDeadlineMillis = null
             receiveAcknowledgementDeadlineMillis = packet.deadlineMillis
         }
@@ -470,7 +503,7 @@ class Iap2LinkEngine(
         packet.retransmissions = 0
         packet.deadlineMillis = nowMillis + peerSynchronization.retransmissionTimeoutMillis
         sendAcknowledgementDeadlineMillis = null
-        sendData(packet.sequence, packet.sessionId, packet.payload)
+        sendData(packet.sequence, packet.sessionId, packet.payload, packet.flushReceipt)
         lastAcknowledgedReceived = lastReceivedInOrder
         if (peerSynchronization.maxRetransmissions > 0) {
             unacknowledged += packet
@@ -490,7 +523,7 @@ class Iap2LinkEngine(
             die("iAP2 packet ${next.sequence} was not acknowledged")
             return
         }
-        sendData(next.sequence, next.sessionId, next.payload)
+        sendData(next.sequence, next.sessionId, next.payload, next.flushReceipt)
         receiveAcknowledgementDeadlineMillis = secondDeadline ?: next.deadlineMillis
     }
 
@@ -506,11 +539,22 @@ class Iap2LinkEngine(
         writePacket(missing.map { it.toByte() }.toByteArray(), sentSequence, CONTROL_EXTENDED_ACKNOWLEDGEMENT, 0)
     }
 
-    private fun sendData(sequence: Int, sessionId: Int, payload: ByteArray) {
-        writePacket(payload, sequence, CONTROL_ACKNOWLEDGEMENT, sessionId)
+    private fun sendData(
+        sequence: Int,
+        sessionId: Int,
+        payload: ByteArray,
+        flushReceipt: Iap2TransportFlushReceipt? = null,
+    ) {
+        writePacket(payload, sequence, CONTROL_ACKNOWLEDGEMENT, sessionId, flushReceipt)
     }
 
-    private fun writePacket(payload: ByteArray?, sequence: Int, control: Int, sessionId: Int) {
+    private fun writePacket(
+        payload: ByteArray?,
+        sequence: Int,
+        control: Int,
+        sessionId: Int,
+        flushReceipt: Iap2TransportFlushReceipt? = null,
+    ) {
         if (state == State.DEAD) return
         accumulatedAcknowledgements = 0
         val length = payload?.size?.plus(HEADER_BYTES + CHECKSUM_BYTES) ?: HEADER_BYTES
@@ -530,7 +574,7 @@ class Iap2LinkEngine(
             frame.write(payload)
             frame.write(checksum(payload, payload.size))
         }
-        appendOutput(frame.toByteArray())
+        appendOutput(frame.toByteArray(), flushReceipt)
     }
 
     private fun setWritable(value: Boolean) {
@@ -548,17 +592,22 @@ class Iap2LinkEngine(
         state = State.DEAD
         writable = false
         output.reset()
+        outputFlushReceipts.clear()
         events.clear()
         events += Event.Dead(reason)
     }
 
-    private fun appendOutput(bytes: ByteArray): Boolean {
+    private fun appendOutput(
+        bytes: ByteArray,
+        flushReceipt: Iap2TransportFlushReceipt? = null,
+    ): Boolean {
         if (state == State.DEAD) return false
         if (bytes.size > config.maximumPendingOutputBytes - output.size()) {
             die("iAP2 pending output limit exceeded")
             return false
         }
         output.write(bytes)
+        flushReceipt?.let(outputFlushReceipts::add)
         return true
     }
 
@@ -695,6 +744,11 @@ class Iap2LinkEngine(
             out.write(value)
         }
     }
+}
+
+/** Completion marker for one iAP2 data frame reaching its synchronous byte-stream write. */
+internal class Iap2TransportFlushReceipt {
+    var flushed: Boolean = false
 }
 
 /** Configuration advertised by the local link endpoint. */

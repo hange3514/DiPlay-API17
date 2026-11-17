@@ -39,11 +39,16 @@ import org.json.JSONObject;
 final class CompatibilityTools {
     private static final String API = "http://next.hzy.cloud:20001/diplay/v1";
     private static final String PREFS = "diplay_compatibility";
-    private static final String CONSENT_VERSION = "0.44.1-call-usb-key-evidence-beta";
+    private static final String CONSENT_VERSION = "0.44.19-airplay-raw-failure-beta";
     private static final int MAX_APK = 20 * 1024 * 1024;
     private static final Pattern SAFE_TOKEN = Pattern.compile("[A-Za-z0-9_.:/-]{1,48}");
     private static final Pattern SAFE_ALSA_PATH = Pattern.compile("/dev/snd/pcmC[0-9]{1,3}D[0-9]{1,3}c");
     private static final Pattern SAFE_ALSA_SUMMARY = Pattern.compile("[A-Za-z0-9_.,:/;=x\\[\\]()+# -]{1,1200}");
+    private static final Set<String> AIRPLAY_FAILURE_TEXT_FIELDS = set(
+        "requestMethod", "requestPath", "requestProtocol", "requestHeadersJson", "bodyEncoding",
+        "requestBodyBase64", "errorRaw", "stackTraceRaw", "peerName", "peerDeviceId",
+        "peerWifiMac", "peerModel", "peerOsVersion", "peerSourceVersion"
+    );
     private static final Set<String> NUMERIC_FIELDS = set(
         "elapsedMs", "waitMs", "durationMs", "sdk", "width", "height", "densityDpi",
         "refreshMilliHz", "attempt", "retryCount", "resultCode", "state", "mode",
@@ -52,23 +57,32 @@ final class CompatibilityTools {
         "usbDeviceCount", "usbInterfaceCount", "endpointCount", "frameCount", "fpsMilli",
         "candidateCount", "triedCount", "targetRate", "peak", "meanAbs", "errors", "capturedPackets",
         "requestedRate", "requestedChannels", "rateMin", "rateMax", "channelsMin", "channelsMax", "untriedCandidateCount", "omittedCandidateCount",
-        "negotiatedRate", "negotiatedChannels", "errno", "card", "controlCount", "keyCode", "keyAction", "keyRepeatCount", "keySource", "keyFlags", "wheelAction", "mediaIndex",
-        "deviceVid", "devicePid", "deviceClass", "deviceSubclass", "deviceProtocol", "usbInterfaceCount", "appleDevicesPresent", "usbSpeedMbps", "usbConfiguration", "oemFrameLength", "oemHeader0", "oemHeader1", "requestedFps", "usbStartupProfile", "vpnWaitMs", "beforeServiceMs", "totalMs", "usb_discovery", "usb_permission", "descriptors", "usb_reenumeration", "configuration_takeover", "usbmux_open", "ncm_open", "usbmux_handshake", "lockdown_pairing", "carkit_tls", "iap2_setup", "mfi_identity", "vpn_bridge", "airplay_listener", "iap2_auth_and_phone_start", "mfi_authentication", "phone_availability", "phone_projection_start", "first_video", "video_ready"
+        "negotiatedRate", "negotiatedChannels", "errno", "card", "controlCount", "keyCode", "keyAction", "keyRepeatCount", "keySource", "keyFlags", "wheelAction", "mediaIndex", "oemServiceVersion",
+        "failureCount", "retryCount", "retryInMs", "sessionCount", "appleDevicesPresent", "connectAttempt", "installedCode",
+        "payloadBytes", "transferBytes", "listenerPort", "tcpSynToPort", "startFlushedAgoMs", "firstNcmBulkOutAcceptedAgoMs", "ncmNetworkReadyAgoMs", "tcpSynBaseline", "tcpSynCurrent", "lastTcpSynAgeMs", "lastIpv4TcpSynAgeMs", "lastRxMdnsServiceAgeMs", "lastRxMdnsServiceMask", "lastRxMdnsServiceQueryMask", "lastRxMdnsServiceResponseMask",
+        "ipVersion", "ipProtocol", "tcpSourcePort", "tcpDestinationPort", "tcpFlags", "frameBytes",
+        "deviceVid", "devicePid", "deviceClass", "deviceSubclass", "deviceProtocol", "usbInterfaceCount", "appleDevicesPresent", "usbSpeedMbps", "usbConfiguration", "oemFrameLength", "oemHeader0", "oemHeader1", "requestedFps", "usbStartupProfile", "vpnWaitMs", "beforeServiceMs", "totalMs", "uptimeMs", "ageMs", "mtu", "localPort", "usb_discovery", "usb_permission", "descriptors", "usb_reenumeration", "configuration_takeover", "usbmux_open", "ncm_open", "usbmux_handshake", "lockdown_pairing", "carkit_tls", "iap2_setup", "mfi_identity", "vpn_bridge", "airplay_listener", "iap2_auth_and_phone_start", "mfi_authentication", "phone_availability", "phone_projection_start", "first_video", "video_ready"
     );
     private static final Set<String> BOOLEAN_FIELDS = set(
         "connected", "videoReady", "surfaceValid", "granted", "success", "muted",
         "active", "musicActive", "phonePresent", "speakerphone", "bluetoothSco",
         "bluetoothA2dp", "wiredHeadset", "microphoneMuted", "nativeProbeLoaded", "candidateListTruncated",
-        "readOnly", "snapshotTruncated", "keyHandled", "keyIsSiriCandidate", "devicePermission", "usbSysfsReadable"
+        "readOnly", "snapshotTruncated", "keyHandled", "keyIsSiriCandidate", "devicePermission", "usbSysfsReadable", "knownProfileMatched", "receiverRegistered",
+        "serviceBusy", "paused", "launchPending", "usbLinked", "activeSession", "tunnelOpen",
+        "vpnRequired", "vpnUsed", "ipv4", "ipv6", "tcp", "udp", "tcpSynSinceNcmOpen", "tcpSynSinceStart", "tcpSynAfterStartFlushAndNetworkReady", "ipv4TcpSynSinceStart", "ipv4TcpSynAfterStartFlushAndNetworkReady", "anyTcpSynAfterStartFlushAndNetworkReady",
+        "serviceDiscoverySinceStart", "serviceDiscoveryQuiet"
     );
-    private static final Set<String> ENUM_FIELDS = set("stage", "phase", "outcome", "status", "reason", "strategy", "eventType", "keyDecision", "keyPath", "usbTransition", "usbVersion", "diagnosticCode", "result");
+    private static final Set<String> ENUM_FIELDS = set("stage", "phase", "outcome", "status", "reason", "strategy", "eventType", "keyDecision", "keyPath", "usbTransition", "usbVersion", "diagnosticCode", "result", "errorType", "origin", "causeType", "decision", "backend", "networkBackend", "family", "service", "connection");
     private static final Set<String> ALSA_PATH_FIELDS = set("devicePath", "selectedPath", "retainedPath", "fromPath", "toPath", "rememberedPath");
     private static final Set<String> ALSA_SUMMARY_FIELDS = set("candidateSummary", "attemptSummary", "alsaCardsSummary", "alsaPcmSummary", "mixerSnapshot", "usbInterfaceSummary", "diagnosticSummary");
     private static final Set<String> ALSA_TOKEN_FIELDS = set("profileKey", "source", "audioType", "result", "fallbackTarget", "stage", "phase");
 
     private static final class EventCandidate {
-        final long time; final JSONObject event; final JSONObject acknowledged;
-        EventCandidate(long time, JSONObject event, JSONObject acknowledged) { this.time = time; this.event = event; this.acknowledged = acknowledged; }
+        final long time; final JSONObject event; final JSONObject acknowledged; final String id; final boolean network; final boolean networkMilestone;
+        EventCandidate(long time, JSONObject event, JSONObject acknowledged, boolean network, boolean networkMilestone) {
+            this.time = time; this.event = event; this.acknowledged = acknowledged;
+            this.id = acknowledged.optString("id", ""); this.network = network; this.networkMilestone = networkMilestone;
+        }
     }
 
     private static final class FilteredEvents {
@@ -94,6 +108,50 @@ final class CompatibilityTools {
             }}).setNegativeButton("关闭", null).show();
     }
 
+    static void checkForUpdate(final MainActivity activity) {
+        if (activity.busy || activity.closed || activity.connecting) return;
+        requireConsent(activity, new Runnable() { public void run() { checkCompatibleUpdate(activity); }});
+    }
+
+    private static void checkCompatibleUpdate(final MainActivity activity) {
+        if (activity.busy || activity.closed || activity.connecting) return;
+        activity.busy = true;
+        activity.showOperation("正在检查本车机的更新…");
+        activity.worker.execute(new Runnable() { public void run() {
+            try {
+                final PackageInfo installed = activity.getPackageManager().getPackageInfo(activity.getPackageName(), 0);
+                JSONObject response = post("/catalog", new JSONObject().put("profile", profile(activity)).put("installedVersionCode", installed.versionCode));
+                JSONArray versions = response.optJSONArray("versions");
+                JSONObject newest = null; int newestSort = Integer.MIN_VALUE; int updateCount = 0;
+                if (versions != null) for (int i = 0; i < versions.length(); i++) {
+                    JSONObject item = versions.optJSONObject(i); if (item == null) continue;
+                    String track = item.optString("trackLabel", "");
+                    if (!"车型测试".equals(track) && !"公开兼容入口".equals(track)) continue;
+                    if (item.optInt("versionCode", 0) <= installed.versionCode) continue;
+                    updateCount++;
+                    int sort = item.optInt("sortCode", item.optInt("versionCode", 0));
+                    if (newest == null || sort > newestSort) { newest = item; newestSort = sort; }
+                }
+                final JSONObject update = newest;
+                final int candidateCount = updateCount;
+                try { MainActivity.record(activity, "VERSION_UPDATE_CHECK", new JSONObject().put("installedCode", installed.versionCode).put("candidateCount", candidateCount).put("status", update == null ? "up_to_date" : "update_available")); } catch (Exception ignored) {}
+                activity.runOnUiThread(new Runnable() { public void run() {
+                    activity.busy = false;
+                    if (activity.closed) return;
+                    if (update == null) {
+                        new AlertDialog.Builder(activity).setTitle("已是最新版本").setMessage("当前车机没有更高的兼容版本。").setPositiveButton("确定", null).show();
+                        return;
+                    }
+                    String notes = update.optString("notes", "");
+                    String message = "当前：" + installed.versionName + "\n可更新：" + update.optString("versionName") + "\n\n" + notes + "\n\nAPK 将先进行 SHA-256 和版本校验，再交给系统安装器。";
+                    new AlertDialog.Builder(activity).setTitle("发现本车型更新").setMessage(message)
+                        .setNegativeButton("稍后", null)
+                        .setPositiveButton("下载并安装", new DialogInterface.OnClickListener() { public void onClick(DialogInterface dialog, int which) { download(activity, update); }}).show();
+                }});
+            } catch (final Exception e) { finishError(activity, "检查在线更新失败", e); }
+        }});
+    }
+
     private static void requireConsent(final MainActivity activity, final Runnable accepted) {
         SharedPreferences prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         if (prefs.getBoolean("consent", false) && CONSENT_VERSION.equals(prefs.getString("consent_version", ""))) { accepted.run(); return; }
@@ -106,7 +164,7 @@ final class CompatibilityTools {
     }
 
     private static String privacyText() {
-        return "\u53ea\u6709\u4f60\u4e3b\u52a8\u6253\u5f00\u8f66\u673a\u517c\u5bb9\u529f\u80fd\u5e76\u786e\u8ba4\u540e\uff0c\u5e94\u7528\u624d\u4f1a\u8054\u7f51\u3002\n\n\u62a5\u544a\u4f1a\u5305\u542b\u8f66\u673a\u578b\u53f7\u3001Android \u7248\u672c\u3001\u5c4f\u5e55\u89c4\u683c\u3001DiPlay \u7248\u672c\u3001\u7b5b\u9009\u540e\u7684\u8bca\u65ad\u4e8b\u4ef6\u3001ALSA \u58f0\u5361/PCM \u4e0e\u53ea\u8bfb mixer \u503c\u3001\u9ea6\u514b\u98ce\u5019\u9009\u3001\u9519\u8bef\u9636\u6bb5/errno\u3001USB \u4ea7\u54c1\u7c7b\u578b\u7f16\u53f7/\u63a5\u53e3\u7c7b\u522b\u53ca\u63d2\u62d4\u65f6\u5e8f\u3001\u65b9\u5411\u76d8\u952e\u503c/\u6309\u4e0b\u91ca\u653e\u53ca\u5904\u7406\u7ed3\u679c\u3001\u4f60\u9009\u62e9\u7684 iPhone \u8fde\u63a5\u548c\u901a\u8bdd\u73b0\u8c61\u3002\n\n\u4e0d\u4f1a\u4e0a\u4f20 VIN\u3001IMEI\u3001USB \u5e8f\u5217\u53f7\u3001UDID\u3001MAC\u3001\u8054\u7cfb\u4eba\u3001\u7535\u8bdd\u53f7\u7801\u3001\u901a\u8bdd\u5185\u5bb9\u3001\u5c4f\u5e55\u753b\u9762\u3001USB \u539f\u59cb\u4f20\u8f93\u6216\u539f\u59cb\u63cf\u8ff0\u7b26\u3001\u5e94\u7528\u5bc6\u94a5\u3001\u5b8c\u6574\u539f\u59cb\u65e5\u5fd7\u6216\u9ea6\u514b\u98ce\u5f55\u97f3\u3002\u95ee\u9898\u8bf4\u660e\u8bf7\u52ff\u586b\u5199\u59d3\u540d\u3001\u7535\u8bdd\u53f7\u7801\u7b49\u4e2a\u4eba\u4fe1\u606f\u3002\u670d\u52a1\u5668\u4fdd\u7559\u62a5\u544a 24 \u5c0f\u65f6\u540e\u81ea\u52a8\u6e05\u7406\u3002\n\n\u62d2\u7edd\u4e0a\u4f20\u4e0d\u4f1a\u5f71\u54cd\u672c\u5730\u6709\u7ebf CarPlay\u3002\u4e0a\u4f20\u524d\u4f1a\u518d\u6b21\u786e\u8ba4\u3002\u5f53\u524d\u516c\u7f51\u62a5\u544a\u63a5\u53e3\u4f7f\u7528\u672a\u52a0\u5bc6 HTTP\uff1b\u4ecb\u610f\u65f6\u8bf7\u62d2\u7edd\u4e0a\u4f20\u3002";
+        return "只有你主动打开车机兼容功能并确认后，应用才会联网。点击在线更新时会发送车机型号、Android API、分辨率和当前应用版本用于匹配版本，不会在检查更新时上传日志。\n\n常规报告包含车机型号、Android 版本、屏幕规格、DiPlay 版本、随机连接编号、筛选后的诊断事件、ALSA 声卡/PCM 与只读 mixer 值、麦克风候选、错误阶段/errno、USB 状态和时序、方向盘按键观察，以及用户态 IPv6/TCP/UDP 网络状态计数。若 AirPlay 请求处理器抛出异常，本版还会记录该失败请求的解析后方法、路径、协议、请求头（最多 4 KB）、请求体（最多 8 KB，Base64 编码）、异常原文和堆栈（分别最多 2 KB / 6 KB），以及已收到的 iPhone 名称、设备 ID、Wi-Fi MAC、型号和系统/来源版本。报告筛选最多保留 1 条此类事件。它不采集连续的 CarPlay 音视频流、通话音频或麦克风录音。\n\n失败事件会包含请求内容、异常详情和手机标识，可能包含请求中的认证或设备信息。请仅在你同意该采集范围时提交。车机本地日志最多保留 24 小时，上传成功后清除已确认上传的记录；服务器报告保留到手动删除。\n\n拒绝上传不会影响本地有线 CarPlay。上传前会再次确认。当前公网报告接口使用未加密 HTTP；介意时请拒绝上传。";
     }
 
     private static void showPrivacy(Activity activity) {
@@ -348,7 +406,7 @@ final class CompatibilityTools {
         catch (Exception e) { new AlertDialog.Builder(activity).setMessage("\u65e0\u6cd5\u751f\u6210\u624b\u673a\u6d4b\u8bd5\u7ed3\u679c\uff0c\u8bf7\u91cd\u8bd5\u3002").setPositiveButton("\u8fd4\u56de", null).show(); return; }
         final String voiceKeyOutcome = keyOutcome(choices[6]);
         new AlertDialog.Builder(activity).setTitle("\u786e\u8ba4\u63d0\u4ea4")
-            .setMessage("\u5c06\u4e0a\u4f20\u7ecf\u7b5b\u9009\u7684\u65e5\u5fd7\u3001USB \u4ea7\u54c1\u7c7b\u578b/\u63a5\u53e3\u4fe1\u606f\u3001\u65b9\u5411\u76d8\u952e\u503c\u4e0e\u5904\u7406\u7ed3\u679c\uff0c\u4ee5\u53ca\u4f60\u5206\u522b\u9009\u62e9\u7684 iPhone 12 / iPhone 15 Pro \u901a\u8bdd\u548c\u65ad\u8fde\u7ed3\u679c\u3002\u4e0d\u4f1a\u4e0a\u4f20 USB \u5e8f\u5217\u53f7/UDID\u3001\u539f\u59cb USB \u6570\u636e\u6216\u901a\u8bdd\u5f55\u97f3\u3002\u516c\u7f51\u4f20\u8f93\u4f7f\u7528 HTTP\u3002\u7ee7\u7eed\uff1f")
+            .setMessage("\u5c06\u4e0a\u4f20\u7ecf\u7b5b\u9009\u7684\u65e5\u5fd7\u3001USB \u4ea7\u54c1\u7c7b\u578b/\u63a5\u53e3\u4fe1\u606f\u3001\u65b9\u5411\u76d8\u952e\u503c\u4e0e\u5904\u7406\u7ed3\u679c\uff0c\u4ee5\u53ca\u4f60\u9009\u62e9\u7684\u901a\u8bdd\u548c\u65ad\u8fde\u7ed3\u679c\u3002\u82e5 AirPlay \u8bf7\u6c42\u5904\u7406\u5931\u8d25\uff0c\u62a5\u544a\u8fd8\u53ef\u80fd\u5305\u542b\u5931\u8d25\u8bf7\u6c42\u5185\u5bb9\u3001\u5f02\u5e38\u539f\u6587/\u5806\u6808\u53ca iPhone \u8bbe\u5907\u6807\u8bc6\uff1b\u8be5\u4e8b\u4ef6\u7684\u8bf7\u6c42\u4f53\u6700\u591a 8 KB\uff0c\u4e14\u4e0d\u5305\u542b\u8fde\u7eed\u97f3\u89c6\u9891\u6d41\u3002\u516c\u7f51\u4f20\u8f93\u4f7f\u7528 HTTP\u3002\u786e\u8ba4\u63d0\u4ea4\uff1f")
             .setPositiveButton("\u786e\u8ba4\u63d0\u4ea4", new DialogInterface.OnClickListener() { public void onClick(DialogInterface dialog, int which) { sendReport(activity, issue, micOutcome, speakerOutcome, phoneTests, voiceKeyOutcome); }})
             .setNegativeButton("\u8fd4\u56de\u4fee\u6539", null).show();
     }
@@ -371,7 +429,7 @@ final class CompatibilityTools {
                     .put("phoneTests", phoneTests).put("keyObservation", new JSONObject().put("voiceKey", voiceKeyOutcome));
                 JSONObject receipt = post("/report", body);
                 final String message = "提交成功。报告编号：" + receipt.optString("id") +
-                    "\n上传事件：" + receipt.optInt("events") + " 条；已清除本次上传的本地记录，未上传或并发新增记录保留。服务器将在 24 小时后自动清理原始报告。";
+                    "\n上传事件：" + receipt.optInt("events") + " 条；已清除本次上传的本地记录，未上传或并发新增记录保留。服务器报告保留至手动清理；车机本地日志最多保留 24 小时。";
                 MainActivity.acknowledge(activity, filtered.acknowledgedRows);
                 activity.runOnUiThread(new Runnable() { public void run() {
                     activity.busy = false;
@@ -387,12 +445,14 @@ final class CompatibilityTools {
         long first = Long.MAX_VALUE;
         for (int i = 0; i < source.length(); i++) first = Math.min(first, source.getJSONObject(i).optLong("time", 0));
         if (first == Long.MAX_VALUE) first = 0;
-        int alsaCount = 0, priorityCount = 0, transportCount = 0;
+        int alsaCount = 0, priorityCount = 0, transportCount = 0, networkCount = 0, networkMilestoneCount = 0;
+        HashSet<String> selectedIds = new HashSet<String>();
         // Keep the newest evidence so old unsubmitted logs cannot crowd out this test run.
         // Reserve ALSA, then direct key/USB/call evidence, then transport details before routine logs.
         for (int pass = 0; pass < 4 && selected.size() < 200; pass++) {
             for (int i = source.length() - 1; i >= 0 && selected.size() < 200; i--) {
                 JSONObject row = source.optJSONObject(i); if (row == null) continue;
+                String rowId = row.optString("id", ""); if (rowId.length() == 0 || selectedIds.contains(rowId)) continue;
                 String raw = row.optString("event", ""); int brace = raw.indexOf('{');
                 String type = (brace >= 0 ? raw.substring(0, brace) : raw).trim();
                 if (!type.matches("[A-Za-z][A-Za-z0-9_]{0,63}")) continue;
@@ -402,8 +462,13 @@ final class CompatibilityTools {
                 boolean alsa = "MEDIA".equals(type) && isAlsaDiagnostic(detailText);
                 boolean priority = isHighValueDiagnostic(type);
                 boolean transport = isTransportDiagnostic(type);
-                if (pass == 0 && (!alsa || alsaCount >= 40) || pass == 1 && (alsa || !priority || transport || priorityCount >= 100) ||
-                    pass == 2 && (alsa || !transport || transportCount >= 60) || pass == 3 && (alsa || priority)) continue;
+                boolean network = CompatibilityReportPolicy.isNetworkStackEvent(type);
+                boolean networkMilestone = network && CompatibilityReportPolicy.isNetworkStackMilestone(type, detailText);
+                boolean airplayFailure = "AIRPLAY_FAILURE_RAW".equals(type);
+                if (pass == 0 && !((alsa && alsaCount < 40) || (networkMilestone && networkMilestoneCount < 32) || airplayFailure) ||
+                    pass == 1 && (alsa || !priority || transport || priorityCount >= 100) ||
+                    pass == 2 && (alsa || !transport || transportCount >= 60 || (network && networkCount >= 36)) ||
+                    pass == 3 && (alsa || priority)) continue;
                 long time = row.optLong("time", first);
                 JSONObject safeEvent;
                 if (alsa) {
@@ -416,7 +481,9 @@ final class CompatibilityTools {
                         Iterator<?> keys = detail.keys();
                         while (keys.hasNext()) {
                             String key = String.valueOf(keys.next()); Object value = detail.opt(key);
-                            if (NUMERIC_FIELDS.contains(key) && value instanceof Number) {
+                            if (airplayFailure && copyAirPlayFailureField(safe, key, value)) {
+                                continue;
+                            } else if (NUMERIC_FIELDS.contains(key) && value instanceof Number) {
                                 double n = ((Number)value).doubleValue(); if (!Double.isNaN(n) && !Double.isInfinite(n) && Math.abs(n) <= 1000000000d) safe.put(key, value);
                             } else if (BOOLEAN_FIELDS.contains(key) && value instanceof Boolean) safe.put(key, value);
                             else if (ENUM_FIELDS.contains(key) && value instanceof String && SAFE_TOKEN.matcher((String)value).matches()) safe.put(key, value);
@@ -427,23 +494,49 @@ final class CompatibilityTools {
                     String summary = diagnosticSummary(type, detailText);
                     if (!code.isEmpty()) safe.put("diagnosticCode", code);
                     if (!summary.isEmpty()) safe.put("diagnosticSummary", summary);
+                    if (network) {
+                        String networkDetail = CompatibilityReportPolicy.safeNetworkDetail(detailText);
+                        if (!networkDetail.isEmpty()) safe.put("networkDetail", networkDetail);
+                    }
                     safeEvent = new JSONObject().put("offsetMs", Math.max(0, time - first)).put("type", type).put("data", safe);
                     if (priority) priorityCount++;
-                    else if (transport) transportCount++;
+                    else if (transport) {
+                        transportCount++;
+                        if (network) networkCount++;
+                    }
                 }
-                selected.add(new EventCandidate(time, safeEvent, new JSONObject().put("id", row.getString("id"))));
+                selectedIds.add(rowId);
+                selected.add(new EventCandidate(time, safeEvent, new JSONObject().put("id", rowId), network, networkMilestone));
+                if (networkMilestone) networkMilestoneCount++;
             }
         }
         java.util.Collections.sort(selected, new java.util.Comparator<EventCandidate>() {
             public int compare(EventCandidate left, EventCandidate right) { return left.time < right.time ? -1 : left.time == right.time ? 0 : 1; }
         });
         ArrayList<EventCandidate> bounded = new ArrayList<EventCandidate>();
-        int remainingBytes = 42000;
+        HashSet<String> boundedIds = new HashSet<String>();
+        int remainingBytes = 42000, networkBudgetBytes = 22000;
+        // Preserve the one bounded raw AirPlay failure before routine transport counters.
+        for (EventCandidate item : selected) if ("AIRPLAY_FAILURE_RAW".equals(item.event.optString("type"))) {
+            int size = item.event.toString().getBytes("UTF-8").length + 8;
+            if (size <= remainingBytes) { bounded.add(item); boundedIds.add(item.id); remainingBytes -= size; }
+        }
+        // Reserve the small number of stack lifecycle anchors, then a bounded recent counter window.
+        for (EventCandidate item : selected) if (item.networkMilestone) {
+            int size = item.event.toString().getBytes("UTF-8").length + 8;
+            if (size <= remainingBytes) { bounded.add(item); boundedIds.add(item.id); remainingBytes -= size; }
+        }
         for (int i = selected.size() - 1; i >= 0; i--) {
-            EventCandidate item = selected.get(i);
+            EventCandidate item = selected.get(i); if (!item.network || item.networkMilestone) continue;
+            int size = item.event.toString().getBytes("UTF-8").length + 8;
+            if (size > networkBudgetBytes || size > remainingBytes) continue;
+            bounded.add(item); boundedIds.add(item.id); networkBudgetBytes -= size; remainingBytes -= size;
+        }
+        for (int i = selected.size() - 1; i >= 0; i--) {
+            EventCandidate item = selected.get(i); if (boundedIds.contains(item.id)) continue;
             int size = item.event.toString().getBytes("UTF-8").length + 8;
             if (size > remainingBytes) continue;
-            bounded.add(item); remainingBytes -= size;
+            bounded.add(item); boundedIds.add(item.id); remainingBytes -= size;
         }
         java.util.Collections.sort(bounded, new java.util.Comparator<EventCandidate>() {
             public int compare(EventCandidate left, EventCandidate right) { return left.time < right.time ? -1 : left.time == right.time ? 0 : 1; }
@@ -458,16 +551,56 @@ final class CompatibilityTools {
 
     private static boolean isHighValueDiagnostic(String type) {
         return "WHEEL_KEY".equals(type) || "WHEEL_CONTROL".equals(type) || "USB_DEVICE".equals(type) ||
+            "APP_STARTUP".equals(type) || "USB_DEFAULT_HANDLER".equals(type) ||
+            "USB_PERMISSION_REQUEST".equals(type) || "USB_PERMISSION_RESULT".equals(type) || "USB_PERMISSION_WAIT".equals(type) ||
+            "USBMUX_WRITE_TIMING".equals(type) || "NCM_WRITE_TIMING".equals(type) ||
+            "START_SESSION_QUEUE".equals(type) || "CONNECTION_PREWARM".equals(type) ||
             "USB_PRESENCE".equals(type) || "FAILED".equals(type) || "DISCONNECTED".equals(type) ||
-            "AUDIO_ROUTING".equals(type) || "AUDIO_FOCUS".equals(type) || type.startsWith("CALL_");
+            "CONNECTION_FAILURE".equals(type) || "AUTO_USB_STATE".equals(type) || "AUTO_BOOT".equals(type) ||
+            "PROCESS_RECOVERY".equals(type) || "JAVA_UNCAUGHT_EXCEPTION".equals(type) || "CONNECTION_CLEAN_EXIT".equals(type) ||
+            "AUDIO_ROUTING".equals(type) || "AUDIO_FOCUS".equals(type) || "AIRPLAY_FAILURE_RAW".equals(type) || type.startsWith("CALL_");
+    }
+
+    private static boolean copyAirPlayFailureField(JSONObject target, String key, Object value) throws Exception {
+        if (AIRPLAY_FAILURE_TEXT_FIELDS.contains(key)) {
+            if (!(value instanceof String)) return true;
+            String text = (String)value;
+            int limit = key.equals("requestHeadersJson") ? 4096 : key.equals("requestBodyBase64") ? 10924 :
+                key.equals("stackTraceRaw") ? 6144 : key.equals("errorRaw") ? 2048 :
+                key.equals("requestPath") ? 1024 : key.equals("peerDeviceId") ? 256 :
+                key.equals("peerName") || key.equals("peerWifiMac") || key.equals("peerModel") ? 128 : 64;
+            if (text.length() > limit || text.indexOf('\u0000') >= 0) return true;
+            if (key.equals("requestMethod") && !text.matches("[A-Za-z_]{1,32}")) return true;
+            if (key.equals("requestProtocol") && !text.matches("[A-Za-z0-9./-]{1,32}")) return true;
+            if (key.equals("bodyEncoding") && !"base64".equals(text)) return true;
+            if (key.equals("requestBodyBase64") && (text.length() % 4 != 0 || !text.matches("[A-Za-z0-9+/]*={0,2}"))) return true;
+            target.put(key, text);
+            return true;
+        }
+        if (key.equals("requestBodyBytes") || key.equals("requestBodyCapturedBytes")) {
+            if (value instanceof Number) {
+                long number = ((Number)value).longValue();
+                if (number >= 0 && number <= (key.equals("requestBodyBytes") ? 8L * 1024 * 1024 : 8192L)) target.put(key, number);
+            }
+            return true;
+        }
+        if (key.equals("requestHeadersTruncated") || key.equals("requestPathTruncated") || key.equals("requestBodyTruncated") ||
+            key.equals("errorTruncated") || key.equals("stackTraceTruncated")) {
+            if (value instanceof Boolean) target.put(key, value);
+            return true;
+        }
+        return false;
     }
 
     private static boolean isTransportDiagnostic(String type) {
-        return "CONNECT_SUMMARY".equals(type) || "CONNECT_TIMING".equals(type) || "USB".equals(type) ||
+        return "CONNECT_SUMMARY".equals(type) || "CONNECT_TIMING".equals(type) ||
+            "START_SESSION_RECOVERY".equals(type) || "USB".equals(type) ||
             "USB_NATIVE".equals(type) || "NCM".equals(type) || "MUX".equals(type) || "USB_TAKEOVER".equals(type) ||
             "USB_PERMISSION".equals(type) || "PAIRING".equals(type) || "PAIRING_RETRY".equals(type) ||
             "REENUMERATION".equals(type) || "WAIT_USB".equals(type) || "PHONE_START".equals(type) ||
-            "AIRPLAY_ENDED".equals(type) || "CONTROL_ENDED".equals(type) || "AUTO_USB".equals(type);
+            "AIRPLAY".equals(type) ||
+            "AIRPLAY_ENDED".equals(type) || "CONTROL_ENDED".equals(type) || "AUTO_USB".equals(type) ||
+            CompatibilityReportPolicy.isNetworkStackEvent(type);
     }
 
     private static String diagnosticCode(String type, String text) {
@@ -488,9 +621,9 @@ final class CompatibilityTools {
     private static String diagnosticSummary(String type, String text) {
         if (text == null || text.length() == 0 || "USB_NETWORK".equals(type) || !(isHighValueDiagnostic(type) || isTransportDiagnostic(type))) return "";
         java.util.regex.Matcher matcher = Pattern.compile("([A-Za-z][A-Za-z0-9_]*)=([^\\s;]+)").matcher(text);
-        Set<String> allowed = set("errno", "result", "attempt", "attempts", "completed", "next", "durationMs", "waitedMs", "timeoutMs", "readTimeouts", "receivedBytes", "submitted", "polls", "cancelled", "actualBytes", "urbStatus", "inbound", "linkUp", "carrier", "connected", "interface", "configuration", "target", "expected", "observed", "length", "declaredLength", "bufferedBytes", "lastUsbReadBytes", "optionalReplyPadding", "previousProtocol", "previousLength", "nextProtocol", "nextLength", "version", "stage", "phase", "profile", "outcome", "sequence", "expectedSequence", "receivedSequence", "stream", "mode", "state", "route", "focus", "usage", "content", "muted", "active", "musicActive", "phonePresent", "speakerphone", "bluetoothSco", "bluetoothA2dp", "wiredHeadset", "microphoneMuted", "sampleRate", "channels", "volume", "maxVolume", "frames", "writtenBytes", "playbackHeadFrames", "ageMs", "calls", "timeouts", "firstSubmitAgeMs", "nativeWaitMs");
+        Set<String> allowed = set("errno", "result", "attempt", "attempts", "completed", "next", "durationMs", "elapsedMs", "waitedMs", "timeoutMs", "readTimeouts", "readErrors", "descriptor", "wiredAvailable", "usbTransport", "receivedBytes", "submitted", "polls", "cancelled", "actualBytes", "urbStatus", "inbound", "linkUp", "carrier", "connected", "interface", "configuration", "target", "expected", "observed", "length", "declaredLength", "bufferedBytes", "lastUsbReadBytes", "optionalReplyPadding", "previousProtocol", "previousLength", "nextProtocol", "nextLength", "version", "stage", "phase", "profile", "outcome", "sequence", "expectedSequence", "receivedSequence", "stream", "mode", "state", "route", "method", "errorType", "frameClass", "frameMethod", "contentBytes", "payloadBytes", "transferBytes", "frameBytes", "protocol", "etherType", "ipVersion", "ipProtocol", "tcpSourcePort", "tcpDestinationPort", "tcpFlags", "baseline", "listenerPort", "tcpSynToPort", "startFlushedAgoMs", "firstNcmBulkOutAcceptedAgoMs", "ncmNetworkReadyAgoMs", "tcpSynBaseline", "tcpSynCurrent", "lastTcpSynAgeMs", "lastIpv4TcpSynAgeMs", "lastRxMdnsServiceAgeMs", "lastRxMdnsServiceMask", "lastRxMdnsServiceQueryMask", "lastRxMdnsServiceResponseMask", "tcpSynSinceNcmOpen", "tcpSynSinceStart", "tcpSynAfterStartFlushAndNetworkReady", "ipv4TcpSynSinceStart", "ipv4TcpSynAfterStartFlushAndNetworkReady", "anyTcpSynAfterStartFlushAndNetworkReady", "serviceDiscoverySinceStart", "serviceDiscoveryQuiet", "status", "decision", "focus", "usage", "content", "muted", "active", "musicActive", "phonePresent", "speakerphone", "bluetoothSco", "bluetoothA2dp", "wiredHeadset", "microphoneMuted", "sampleRate", "channels", "volume", "maxVolume", "frames", "writtenBytes", "playbackHeadFrames", "ageMs", "calls", "timeouts", "firstSubmitAgeMs", "nativeWaitMs", "nativeErrorCode", "identityReady", "nativeReady", "nativeStatus", "networkStartDurationMs", "readyBeforeUse", "rxMdns", "rxIpv6Mdns", "rxIpv4Mdns", "mfiReady", "notificationIndex", "expectedControlInterface", "dataInterface", "matchesDataInterface", "payloadLength", "linkWord", "carrierMutation", "notifications", "appleLinkNotifications", "lastCarrierAgeMs", "lastAppleLinkWord", "lastAppleLinkAgeMs", "controlInterface", "skipped", "resyncs", "count");
         StringBuilder summary = new StringBuilder();
-        while (matcher.find() && summary.length() < 450) {
+        while (matcher.find() && summary.length() < 600) {
             String key = matcher.group(1), value = matcher.group(2);
             if (!allowed.contains(key) || value.length() > 48 || !value.matches("[A-Za-z0-9_.:/+-]+")) continue;
             if (summary.length() > 0) summary.append(' ');
@@ -603,7 +736,7 @@ final class CompatibilityTools {
 
     private static JSONObject post(String path, JSONObject payload) throws Exception {
         byte[] bytes = payload.toString().getBytes("UTF-8");
-        if (bytes.length > 65536) throw new Exception("请求超过允许大小");
+        if (bytes.length > 96 * 1024) throw new Exception("请求超过允许大小");
         HttpURLConnection c = open(path);
         try {
             c.setRequestMethod("POST"); c.setDoOutput(true); c.setFixedLengthStreamingMode(bytes.length);

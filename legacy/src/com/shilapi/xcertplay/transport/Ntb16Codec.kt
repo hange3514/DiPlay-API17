@@ -17,13 +17,20 @@ object Ntb16Codec {
     private const val USB_PACKET_SIZE = 512
 
     /** Wraps one Ethernet frame in one NTB16 block, padding an exact 512-byte boundary. */
-    fun build(frame: ByteArray, sequence: Int): ByteArray {
-        require(frame.isNotEmpty()) { "frame must not be empty" }
-        require(frame.size <= MAX_DATAGRAM_BYTES) { "frame exceeds the NTB16 length field" }
+    fun build(frame: ByteArray, sequence: Int): ByteArray =
+        build(frame, 0, frame.size, sequence)
+
+    /** Wraps a byte range directly, avoiding an intermediate Ethernet-frame copy. */
+    fun build(frame: ByteArray, offset: Int, length: Int, sequence: Int): ByteArray {
+        require(offset >= 0 && length > 0 && offset <= frame.size - length) {
+            "frame range is outside the source buffer"
+        }
+        require(length <= MAX_DATAGRAM_BYTES) { "frame exceeds the NTB16 length field" }
         require(sequence in 0..0xffff) { "sequence must fit in u16" }
 
-        val blockLength = DATAGRAM_INDEX + frame.size
-        val block = ByteArray(blockLength)
+        val blockLength = DATAGRAM_INDEX + length
+        val transferLength = blockLength + if (blockLength % USB_PACKET_SIZE == 0) 1 else 0
+        val block = ByteArray(transferLength)
         putU32(block, 0, NTH16_SIG)
         putU16(block, 4, NTH_LENGTH)
         putU16(block, 6, sequence)
@@ -34,13 +41,13 @@ object Ntb16Codec {
         putU16(block, 16, NDP_LENGTH)
         putU16(block, 18, 0)
         putU16(block, 20, DATAGRAM_INDEX)
-        putU16(block, 22, frame.size)
+        putU16(block, 22, length)
         putU16(block, 24, 0)
         putU16(block, 26, 0)
 
-        frame.copyInto(block, DATAGRAM_INDEX)
+        frame.copyInto(block, DATAGRAM_INDEX, offset, offset + length)
         // A transfer that ends exactly on a USB packet boundary is read as a short packet.
-        return if (block.size % USB_PACKET_SIZE == 0) block + byteArrayOf(0) else block
+        return block
     }
 
     /**

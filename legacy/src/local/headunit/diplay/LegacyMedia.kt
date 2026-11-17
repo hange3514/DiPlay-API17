@@ -116,7 +116,7 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
   fun offer(b:ByteArray,t:Int){if(!stop.get())queue.offer(b,t)}
   @Synchronized fun volume(value:Float){val t=track?:return;if(appliedVolume==value)return;runCatching{if(t.setStereoVolume(value,value)==AudioTrack.SUCCESS)appliedVolume=value}}
   private fun stopIdleNavigation(){if(playing&&role=="navigation"&&!navigationActivity.active(System.nanoTime())){track?.stop();playing=false;log("navigation_idle_stopped")}}
-  private fun write(input:ByteArray){val channelBytes=if(outputChannels!=f.channels)PcmEvidence.stereo(input)else input;val bytes=rateConverter?.invoke(channelBytes)?:channelBytes;pcmEvidence.observe(bytes);if(role=="navigation"&&!navigationActivity.packet(bytes,System.nanoTime())){stopIdleNavigation();return};val level=routing?.packet(role)?:playbackFocus?.packet()?:1f;volume(level);if(level==0f){mutedPackets++;progress();return};if(role=="call")CallDuplexAB.callDownlinkFirstPcm(routing?.captureContext());if(!playing){track!!.play();playing=true};if(role=="call")CallDuplexAB.injectPhaseTone(routing?.captureContext(),track!!,outputRate,outputChannels,stream);if(role=="call")CallToneProbe.maybeInject(routing?.captureContext(),track!!,outputRate,outputChannels,stream);var at=0;while(at<bytes.size&&!stop.get()){val n=track!!.write(bytes,at,bytes.size-at);if(n<=0)throw IllegalStateException("AudioTrack write failed");at+=n;bytesWritten+=n};if(bytesWritten==bytes.size.toLong())log("audio_first_pcm_written bytes=${bytes.size}");progress()}
+  private fun write(input:ByteArray){val channelBytes=if(outputChannels!=f.channels)PcmEvidence.stereo(input)else input;val bytes=rateConverter?.invoke(channelBytes)?:channelBytes;pcmEvidence.observe(bytes);if(role=="navigation"&&!navigationActivity.packet(bytes,System.nanoTime())){stopIdleNavigation();return};val level=routing?.packet(role)?:playbackFocus?.packet()?:1f;volume(level);if(level==0f){mutedPackets++;progress();return};if(role=="call")CallDuplexAB.callDownlinkFirstPcm(routing?.captureContext());if(!playing){track!!.play();playing=true};if(role=="call")CallDuplexAB.injectPhaseTone(routing?.captureContext(),track!!,outputRate,outputChannels,stream);var at=0;while(at<bytes.size&&!stop.get()){val n=track!!.write(bytes,at,bytes.size-at);if(n<=0)throw IllegalStateException("AudioTrack write failed");at+=n;bytesWritten+=n};if(bytesWritten==bytes.size.toLong())log("audio_first_pcm_written bytes=${bytes.size}");progress()}
   private fun progress(){val now=System.nanoTime();if(now-lastProgress<TimeUnit.SECONDS.toNanos(if(checkpoints<5||role=="assistant")1 else 10))return;lastHead=runCatching{track?.playbackHeadPosition?.toLong()?.and(0xffffffffL)?:lastHead}.getOrDefault(lastHead);lastProgress=now;val tag=if(checkpoints++<5)"audio_checkpoint" else "audio_progress";val endian=if(role=="call")" ${pcmEvidence.byteOrderCandidateSummary()}" else "";log("$tag role=$role stream=$stream written=$bytesWritten mutedPackets=$mutedPackets queued=${queue.size()} dropped=${queue.drops()} head=$lastHead peak=${pcmEvidence.peak} nonzero=${pcmEvidence.nonzero} volume=$appliedVolume$endian");if(role=="call")AudioRouting.logCallOutput(routing?.captureContext()?:return,track,stream,tag,bytesWritten,lastHead,appliedVolume)}
   private fun loop(){var decoder:MediaCodec?=null
    var inputBuffers:Array<ByteBuffer>?=null;var outputBuffers:Array<ByteBuffer>?=null;var inFlight=0
@@ -158,9 +158,10 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
  }
  inner class Microphone(private val c:MicrophoneConfig,private val supported:Boolean):Closeable {
   private val stop=AtomicBoolean(false);@Volatile private var recorder:AudioRecord?=null;@Volatile private var socket:DatagramSocket?=null
-  private val thread=MediaWorkers.start("api17-mic"){capture()}
   private var activeSource=0
   private val readRecovery=MicrophoneReadRecoveryPolicy()
+  private val telephonyFilter=if(c.audioType.equals("telephony",true))TelephonyMicFilter(c.sampleRate)else null
+  private val thread=MediaWorkers.start("api17-mic"){capture()}
   private fun releaseRecorder(){val r=recorder?:return;runCatching{r.stop()};r.release();check(r.state==AudioRecord.STATE_UNINITIALIZED){"Microphone release incomplete"};recorder=null;activeSource=0;readRecovery.recorderStopped()}
   private fun alsaCapture(s:DatagramSocket,counters:MicrophoneCounters,buffer:ByteArray,context:android.content.Context?):Boolean{
    if(!AlsaProbe.available()){log("microphone_alsa_scan result=native_unavailable fallback=AudioRecord kind=${c.audioType}");return false}
@@ -256,6 +257,7 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
        val amp=kotlin.math.abs(v);if(amp>windowPeak)windowPeak=amp;windowAbs+=amp;windowSamples++
        buffer[filled++]=(v and 255).toByte();buffer[filled++]=((v shr 8) and 255).toByte()
        if(filled==buffer.size){
+        telephonyFilter?.process(buffer)
         val p=MicrophonePacketizer.sealPacket(c.key,c.payloadType,counters,MicrophonePacketizer.toCarPlayMicrophoneWirePcm(buffer),c.rtpSamplesPerPacket)
         s.send(DatagramPacket(p,p.size,c.host,c.port));captured++;windowPackets++;filled=0
        }
@@ -266,7 +268,7 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
       val now=System.nanoTime()
       if(now-windowStart>=TimeUnit.SECONDS.toNanos(1)){
        val meanAbs=if(windowSamples==0L)0L else windowAbs/windowSamples
-       log("microphone_duplex_evidence kind=${c.audioType} path=${current.candidate.path} source=alsa windowPackets=$windowPackets windowPeak=$windowPeak windowMeanAbs=$meanAbs hwRate=${current.rate} hwChannels=${current.channels} nextRtpSequence=${counters.sequence}")
+       log("microphone_duplex_evidence kind=${c.audioType} path=${current.candidate.path} source=alsa windowPackets=$windowPackets windowPeak=$windowPeak windowMeanAbs=$meanAbs hwRate=${current.rate} hwChannels=${current.channels} nextRtpSequence=${counters.sequence} dsp=${telephonyFilter?.diagnosticSummary()?:"off"}")
        if(windowPeak>=128&&meanAbs>=16L){AlsaCapturePathSelector.rememberSignal(context,inventory,current.candidate.path,current.rate,current.channels,windowPeak,meanAbs);if(!signalReported){log("microphone_alsa_signal_detected path=${current.candidate.path} peak=$windowPeak meanAbs=$meanAbs rate=${current.rate} channels=${current.channels}");signalReported=true}}
        if(windowPeak==0){silentWindows++}else silentWindows=0
        if(silentWindows>=3&&nextIndex<candidates.size){switchCandidate=true}
@@ -300,8 +302,9 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
    try{
     log("microphone_negotiated kind=${c.audioType} codec=${c.codec} rate=${c.sampleRate} channels=${c.channels} payloadType=${c.payloadType} frameMillis=${c.frameMillis} frameBytes=${c.frameBytes} rtpSamples=${c.rtpSamplesPerPacket}")
     require(c.codec==AudioCodecKind.LPCM&&c.channels==1&&c.sampleRate in 8000..48000&&c.frameBytes in 2..8192&&c.frameMillis in 1..100)
+    if(telephonyFilter!=null)log("microphone_dsp enabled=true kind=telephony location=pcm_before_packetizer routeChanged=false sourceChanged=false downlinkChanged=false ${telephonyFilter.diagnosticSummary()}")
     val context=routing?.captureContext()
-    val s=DatagramSocket();socket=s;val counters=MicrophoneCounters();val buffer=ByteArray(c.frameBytes);var filled=0;var paused=false;var nextSilenceNs=0L
+    val s=LegacySockets.udp();socket=s;val counters=MicrophoneCounters();val buffer=ByteArray(c.frameBytes);var filled=0;var paused=false;var nextSilenceNs=0L
     // Prefer a direct, dynamically discovered ALSA input on every microphone stream.
     // The MX9A0's known-good pcmC1D0c path is tried first; other capture-capable nodes
     // are discovered from /proc/asound and /dev/snd. AudioRecord is used only when no
@@ -353,7 +356,7 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
        MicrophoneReadRecoveryPolicy.Action.FATAL -> throw IOException("Microphone read failed after ${readRecovery.restartAttempts} restarts: $n")
       }
      if(!siriCapture.capture(supported,c.audioType)||CallDuplexAB.holdMicrophone(if(c.audioType.equals("telephony",true))CallDuplexAB.microphoneStage(context,activeSource,recorder?.recordingState?:0)else -1)){filled=0;continue}
-     if(filled==buffer.size){for(i in buffer.indices step 2){val sample=((buffer[i].toInt() and 255) or (buffer[i+1].toInt() shl 8)).toShort().toInt();val amp=kotlin.math.abs(sample);if(amp>windowPeak)windowPeak=amp;windowAbs+=amp;windowSamples++};val p=MicrophonePacketizer.sealPacket(c.key,c.payloadType,counters,MicrophonePacketizer.toCarPlayMicrophoneWirePcm(buffer),c.rtpSamplesPerPacket);s.send(DatagramPacket(p,p.size,c.host,c.port));captured++;inputBytes+=buffer.size;windowPackets++;filled=0;val now=System.nanoTime();if(now-windowStart>=TimeUnit.SECONDS.toNanos(1)){log("microphone_duplex_evidence kind=${c.audioType} sentPackets=$captured windowPackets=$windowPackets inputBytes=$inputBytes windowPeak=$windowPeak windowMeanAbs=${if(windowSamples==0L)0 else windowAbs/windowSamples} source=$activeSource liveStage=${CallRouteSelfTest.liveStage()} nextRtpSequence=${counters.sequence} nextRtpTimestamp=${counters.timestamp.toLong() and 0xffffffffL} recorderState=${recorder?.recordingState}");windowPackets=0;windowPeak=0;windowAbs=0;windowSamples=0;windowStart=now}}
+     if(filled==buffer.size){for(i in buffer.indices step 2){val sample=((buffer[i].toInt() and 255) or (buffer[i+1].toInt() shl 8)).toShort().toInt();val amp=kotlin.math.abs(sample);if(amp>windowPeak)windowPeak=amp;windowAbs+=amp;windowSamples++};telephonyFilter?.process(buffer);val p=MicrophonePacketizer.sealPacket(c.key,c.payloadType,counters,MicrophonePacketizer.toCarPlayMicrophoneWirePcm(buffer),c.rtpSamplesPerPacket);s.send(DatagramPacket(p,p.size,c.host,c.port));captured++;inputBytes+=buffer.size;windowPackets++;filled=0;val now=System.nanoTime();if(now-windowStart>=TimeUnit.SECONDS.toNanos(1)){log("microphone_duplex_evidence kind=${c.audioType} sentPackets=$captured windowPackets=$windowPackets inputBytes=$inputBytes windowPeak=$windowPeak windowMeanAbs=${if(windowSamples==0L)0 else windowAbs/windowSamples} source=$activeSource liveStage=${CallRouteSelfTest.liveStage()} nextRtpSequence=${counters.sequence} nextRtpTimestamp=${counters.timestamp.toLong() and 0xffffffffL} recorderState=${recorder?.recordingState} dsp=${telephonyFilter?.diagnosticSummary()?:"off"}");windowPackets=0;windowPeak=0;windowAbs=0;windowSamples=0;windowStart=now}}
     }
    }catch(_:InterruptedException){}catch(e:Throwable){if(!stop.get())log("microphone_failed="+e.javaClass.simpleName+" detail="+e.message)}finally{stop.set(true);runCatching{releaseRecorder()}.onFailure{log("microphone_release_failed="+it.javaClass.simpleName)};socket?.close();log("microphone_stopped kind=${c.audioType} capturedPackets=$captured silentPackets=$silence")}
   }

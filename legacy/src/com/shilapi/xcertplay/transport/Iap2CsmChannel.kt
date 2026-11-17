@@ -60,6 +60,22 @@ class Iap2CsmChannel private constructor(
      * is thrown instead of returning a partial-send result.
      */
     fun send(frame: Iap2Frame, timeoutMillis: Long = DEFAULT_SEND_TIMEOUT_MILLIS) {
+        sendFrame(frame, timeoutMillis, awaitTransportFlush = false)
+    }
+
+    /** Sends a complete CSM frame and waits for the underlying stream's write to finish. */
+    internal fun sendAndAwaitTransportFlush(
+        frame: Iap2Frame,
+        timeoutMillis: Long = DEFAULT_SEND_TIMEOUT_MILLIS,
+    ) {
+        sendFrame(frame, timeoutMillis, awaitTransportFlush = true)
+    }
+
+    private fun sendFrame(
+        frame: Iap2Frame,
+        timeoutMillis: Long,
+        awaitTransportFlush: Boolean,
+    ) {
         requireTimeout(timeoutMillis)
         synchronized(sendLock) {
             try {
@@ -73,13 +89,18 @@ class Iap2CsmChannel private constructor(
             val deadlineNanos = deadlineAfter(timeoutMillis)
             for (chunk in chunks) {
                 val queued = try {
-                    link.sendControlAwaitCapacity(chunk, remainingMillis(deadlineNanos))
+                    if (awaitTransportFlush) {
+                        link.sendControlAwaitTransportFlush(chunk, remainingMillis(deadlineNanos))
+                    } else {
+                        link.sendControlAwaitCapacity(chunk, remainingMillis(deadlineNanos))
+                    }
                 } catch (failure: Throwable) {
                     if (failure is Error) fatal(failure)
                     failClosed(failure)
                 }
                 if (!queued) {
-                    failClosed(IOException("iAP2 could not queue the complete CSM frame before its timeout"))
+                    val action = if (awaitTransportFlush) "write" else "queue"
+                    failClosed(IOException("iAP2 could not $action the complete CSM frame before its timeout"))
                 }
             }
         }

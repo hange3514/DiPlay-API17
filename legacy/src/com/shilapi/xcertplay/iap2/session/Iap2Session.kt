@@ -32,8 +32,28 @@ class Iap2Session private constructor(
     }
 
     fun send(frame: Iap2Frame, timeoutMillis: Long = DEFAULT_SEND_TIMEOUT_MILLIS) {
+        sendFrame(frame, timeoutMillis, awaitTransportFlush = false)
+    }
+
+    /** Sends a frame and waits until the underlying stream reports the bytes written. */
+    fun sendAndAwaitTransportFlush(
+        frame: Iap2Frame,
+        timeoutMillis: Long = DEFAULT_SEND_TIMEOUT_MILLIS,
+    ) {
+        sendFrame(frame, timeoutMillis, awaitTransportFlush = true)
+    }
+
+    private fun sendFrame(
+        frame: Iap2Frame,
+        timeoutMillis: Long,
+        awaitTransportFlush: Boolean,
+    ) {
         try {
-            channel.send(frame, timeoutMillis)
+            if (awaitTransportFlush) {
+                channel.sendAndAwaitTransportFlush(frame, timeoutMillis)
+            } else {
+                channel.send(frame, timeoutMillis)
+            }
             emitFrameTrace(Iap2TraceDirection.TX, frame)
         } catch (failure: Throwable) {
             emitTrace(

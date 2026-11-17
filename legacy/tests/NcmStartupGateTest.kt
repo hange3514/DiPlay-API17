@@ -19,6 +19,7 @@ class NcmStartupGateTest {
  }
  @Test fun startBeforeWorkerAndDuplicateStartAreSafe(){val g=NcmStartupGate();g.start();g.start();assertTrue(g.await())}
  @Test fun lateStartCannotResurrectClosedSession(){val g=NcmStartupGate();g.close();g.start();assertFalse(g.await())}
+ @Test fun startReportsWhetherGateWasAlreadyClosed(){val open=NcmStartupGate();assertTrue(open.start());assertTrue(open.await());val closed=NcmStartupGate();closed.close();assertFalse(closed.start());assertFalse(closed.await())}
  @Test fun interruptedWaitDoesNotReleasePacket(){
   val g=NcmStartupGate();val done=CountDownLatch(1);var released=false
   val t=Thread{try{released=g.await()}catch(_:InterruptedException){}finally{done.countDown()}}

@@ -37,7 +37,7 @@ internal class BufferedAudioStream(
     private var cleanupStarted = false // guarded by lock; permits reentrant close without recursion
     @Volatile internal var outputCleanupComplete = false
         private set
-    private val server = ServerSocket(0)
+    private val server = local.headunit.diplay.LegacySockets.tcp()
     private val boundPort = server.localPort
     @Volatile private var client: Socket? = null
     private val lock = Object()

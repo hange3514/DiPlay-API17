@@ -1,23 +1,28 @@
-# DiPlay API 17 兼容性移植
+﻿# DiPlay API 17 兼容性移植
 
-本仓库是 shihabal3amri/DiPlay 的 Android API 17 移植与兼容性实验分支，遵循上游 GPL-3.0 许可证。项目尝试在 Android 4.2.2 车机上通过 USB 有线连接运行 CarPlay。
+本仓库是基于 [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) 的 Android API 17 有线 CarPlay 移植与兼容性实验分支，遵循 GPL-3.0。公开源码和版本 APK 发布在 GitHub Releases。
 
-## 版本状态
+## 当前版本
 
-- 0.40.0：目前唯一有明确车上可用记录的稳定有线版本。
-- 0.44.1：兼容性证据测试版，用于一次收集方向盘按键、通话双向声音和不同 iPhone 的 USB 稳定性证据。新增诊断尚未在车上验证，不代表问题已修复。
-- 目前只有比亚迪宋 DM 2017 款、MX9A0 车机、Android 4.2.2 / API 17、1024×600 屏幕、iPhone 15 Pro Max / iOS 26.2.1 有明确车上测试记录。没有在其他车型或车机上测试。iPhone 12 的断连反馈来自用户报告，仍需复现。
+- 最新实验版：**0.44.49-usb-reattach-focus-beta**，适用于 Android API 17。对应源码在 `legacy/`，APK 与 SHA-256 在 [GitHub Releases](https://github.com/hange3514/DiPlay-API17/releases)。
+- 已知实车测试组合：比亚迪宋 DM 2017 款、Freescale MX9A0、Android 4.2.2 / API 17、1024×600、iPhone 15 Pro Max / iOS 26.2.1。0.44.49 本身尚未完成实车验证；没有在其他车型或车机上验证。
+- 0.40.0 是此前有明确稳定有线使用记录的版本。历史版本可在 Releases 查看。
 
-## 0.44.1 一次性测试
+## 0.44.49 更新摘要
 
-请按 docs/RELEASE_0.44.1_CALL_USB_KEY_EVIDENCE.md 操作。它会分别记录每台手机的连接稳定性、通话两端实际听音结果、方向盘键事件与 USB 枚举变化。不要录制通话。
+- 沿用应用内用户态 IPv6 网络处理，正常连接不再创建 Android VPN，因而不再出现 VPN 授权弹窗。
+- 保留 0.44.48 的电话麦克风低延迟滤波：抑制低频风噪/轰鸣，并在语音间隙柔和压低底噪；没有更换已验证的音频通路。
+- 保留启动过渡动画、连接进度界面和控制面板的界面优化。
+- 继续使用此前连接预热；本版修复 USB 重枚举后授权对象过期和默认 Activity 抢占 USB 系统弹窗导致的等待问题。CarKit/MFi 握手耗时仍需实车确认。
 
-## 隐私说明
+逐项说明、安装步骤和 SHA-256 见 [`docs/RELEASE_0.44.49.md`](docs/RELEASE_0.44.49.md)。
 
-兼容性报告上传到维护者的私人服务器，使用未加密 HTTP。上传内容包括车机型号和 Android 版本、用户填写的问题描述、经过筛选的诊断日志、USB VID/PID 与接口特征、方向盘键码，以及测试者手动确认的通话结果。不会主动采集 USB 序列号、iPhone UDID、联系人、电话号码、原始 USB 数据包或通话录音。介意上传到私人服务器的用户请勿提交报告。
+## 隐私与发布内容
 
-服务器按现行策略在 24 小时后清理报告。在线测试 APK 由私人更新目录提供；GitHub 发布源码与说明，不附带 APK。公开源码不包含私人服务令牌、签名材料或离线 MFi 身份文件；自行构建需按 docs/CONFIGURATION.md 配置所需文件。
+兼容性报告会上传到维护者的私人服务器。报告可能包含车机型号及 Android 版本、用户描述、USB 接口特征、按键码、连接阶段日志和用户手动确认的测试结果。介意上传到私人服务器的用户请勿提交报告。详见 [`docs/COMPATIBILITY_TESTING.md`](docs/COMPATIBILITY_TESTING.md)。
 
-## 上游与改动
+公开源码不包含私人服务器令牌、签名密钥或离线 MFi 身份文件。公开 APK 按维护者决定包含运行所需的上游来源附件身份；来源说明见 [`docs/AUTH_PROVENANCE.md`](docs/AUTH_PROVENANCE.md)。这不代表 Apple 认证或额外分发授权，也不保证未来 iOS 版本或其他车型可用。
 
-上游来源、移植范围、许可和本分支改动请见 CHANGELOG 与兼容性测试说明。测试结论只适用于明确列出的实测组合。
+## 构建
+
+源码树位于 `legacy/`。API 17 编译所需工具链与本地 Android SDK 组件没有打包到仓库；`docs/BUILD.md` 说明已知构建环境。公开 APK 是独立签名的发布产物，不能使用其他签名覆盖已安装的不同签名版本。

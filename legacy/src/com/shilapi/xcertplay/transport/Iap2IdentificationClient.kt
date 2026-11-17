@@ -57,6 +57,9 @@ data class Iap2IdentificationConfig(
     val chargingConnectors: EvChargingConnectors = EvChargingConnectors.CCS2_TYPE2,
     /** Also offer wheel speed ($PASCD) in the location component; needs [locationInformationEnabled]. */
     val vehicleSpeedEnabled: Boolean = false,
+    /** Canonical iAP2 USB host component name; fallback is used only after an explicit rejection. */
+    val usbHostTransportName: String = Iap2IdentificationClient.DEFAULT_USB_HOST_TRANSPORT_NAME,
+    val usbHostTransportFallbackName: String? = Iap2IdentificationClient.LEGACY_USB_HOST_TRANSPORT_NAME,
 ) {
     constructor(
         name: String,
@@ -87,6 +90,7 @@ data class Iap2IdentificationConfig(
         }
         require(language.isNotBlank()) { "Identification language must not be blank" }
         require(externalAccessoryProtocol.isNotBlank()) { "External accessory protocol must not be blank" }
+        require(usbHostTransportName.isNotBlank()) { "USB Host transport name must not be blank" }
         listOf(
             name,
             modelIdentifier,
@@ -96,8 +100,15 @@ data class Iap2IdentificationConfig(
             hardwareVersion,
             language,
             externalAccessoryProtocol,
+            usbHostTransportName,
         ).forEach {
             require('\u0000' !in it) { "NUL-terminated identification strings must not contain U+0000" }
+        }
+        require(usbHostTransportFallbackName == null || usbHostTransportFallbackName.isNotBlank()) {
+            "USB Host transport fallback name must not be blank"
+        }
+        require(usbHostTransportFallbackName == null || '\u0000' !in usbHostTransportFallbackName) {
+            "USB Host transport fallback name must not contain U+0000"
         }
         require(carPlayUsbInterfaceNumber in 0..0xff) {
             "carPlayUsbInterfaceNumber must be in 0..255"
@@ -137,8 +148,7 @@ internal fun Iap2IdentificationConfig.forWirelessLink(
 /** Identification failures distinguished from the underlying iAP2 transport failure. */
 sealed class Iap2IdentificationException(message: String) : IOException(message) {
     class Rejected(parameterIds: Set<Int>) : Iap2IdentificationException(
-        "iAP2 identification rejected parameters ${parameterIds.sorted().joinToString(prefix = "[", postfix = "]") { "0x${it.toString(16).padStart(4, '0')}" }}; " +
-            "this minimal identification profile has no optional components to remove",
+        "iAP2 identification rejected parameters ${parameterIds.sorted().joinToString(prefix = "[", postfix = "]") { "0x${it.toString(16).padStart(4, '0')}" }}",
     ) {
         val parameterIds: Set<Int> = parameterIds.toSet()
     }
@@ -146,6 +156,18 @@ sealed class Iap2IdentificationException(message: String) : IOException(message)
     class UnexpectedMessage(messageId: Int) : Iap2IdentificationException(
         "Unexpected iAP2 identification message 0x${messageId.toString(16).padStart(4, '0')}",
     )
+}
+
+internal object Iap2UsbHostTransportFallbackPolicy {
+    fun nextName(
+        config: Iap2IdentificationConfig,
+        rejectedParameterIds: Set<Int>,
+        alreadyRetried: Boolean,
+    ): String? {
+        if (alreadyRetried || 16 !in rejectedParameterIds) return null
+        return config.usbHostTransportFallbackName
+            ?.takeIf { it.isNotBlank() && it != config.usbHostTransportName }
+    }
 }
 
 /**
@@ -157,7 +179,11 @@ sealed class Iap2IdentificationException(message: String) : IOException(message)
 class Iap2IdentificationClient(private val session: Iap2Session) {
     /** Waits for link negotiation, then completes the 1D00/1D01/1D02 exchange. */
     @Throws(IphoneUsbException::class, Iap2IdentificationException::class)
-    fun identify(config: Iap2IdentificationConfig, timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS) {
+    fun identify(
+        config: Iap2IdentificationConfig,
+        timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+        onProgress: (String) -> Unit = {},
+    ) {
         require(timeoutMillis in 1..MAXIMUM_TIMEOUT_MILLIS) {
             "timeoutMillis must be in 1..$MAXIMUM_TIMEOUT_MILLIS"
         }
@@ -166,14 +192,31 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
             throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 control session readiness")
         }
 
+        var activeConfig = config
+        var usedTransportFallback = false
         while (true) {
             val frame = session.recv(remainingMillis(deadlineNanos))
                 ?: throw IphoneUsbException.TimedOut("Timed out waiting for iAP2 identification")
             when (frame.messageId) {
-                START_IDENTIFICATION -> session.send(identificationInformation(config), remainingMillis(deadlineNanos))
+                START_IDENTIFICATION -> {
+                    onProgress("iap2 identify profile usbHostTransport=${activeConfig.usbHostTransportName} interface=${activeConfig.carPlayUsbInterfaceNumber}")
+                    session.send(identificationInformation(activeConfig), remainingMillis(deadlineNanos))
+                }
                 IDENTIFICATION_ACCEPTED -> return
                 IDENTIFICATION_REJECTED -> {
                     val rejected = Iap2BodyReader.of(frame).list().mapTo(LinkedHashSet()) { it.id }
+                    val fallback = Iap2UsbHostTransportFallbackPolicy.nextName(
+                        activeConfig,
+                        rejected,
+                        usedTransportFallback,
+                    )
+                    if (fallback != null) {
+                        activeConfig = activeConfig.copy(usbHostTransportName = fallback)
+                        usedTransportFallback = true
+                        onProgress("iap2 identify retry usbHostTransport=$fallback rejected=0x0010")
+                        session.send(identificationInformation(activeConfig), remainingMillis(deadlineNanos))
+                        continue
+                    }
                     throw Iap2IdentificationException.Rejected(rejected)
                 }
                 else -> throw Iap2IdentificationException.UnexpectedMessage(frame.messageId)
@@ -186,6 +229,8 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
         const val IDENTIFICATION_INFORMATION = 0x1d01
         const val IDENTIFICATION_ACCEPTED = 0x1d02
         const val IDENTIFICATION_REJECTED = 0x1d03
+        const val DEFAULT_USB_HOST_TRANSPORT_NAME = "USBHostTransport"
+        const val LEGACY_USB_HOST_TRANSPORT_NAME = "IAP2-USBHost"
 
         private const val DEFAULT_TIMEOUT_MILLIS = 10_000L
         private const val MAXIMUM_TIMEOUT_MILLIS = 5 * 60 * 1_000L
@@ -247,7 +292,7 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
                 if (wireless == null) {
                     group(16) {
                         u16(0, 0)
-                        string(1, "USBHostTransport")
+                        string(1, config.usbHostTransportName)
                         void(2)
                         u8(3, config.carPlayUsbInterfaceNumber)
                         void(4)

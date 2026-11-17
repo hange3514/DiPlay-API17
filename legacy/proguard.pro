@@ -1,7 +1,12 @@
 -keep public class local.headunit.diplay.MainActivity { *; }
 -keep public class local.headunit.diplay.WiredService { *; }
 -keep class local.headunit.diplay.NativeUsb { *; }
+-keep class local.headunit.diplay.NativeIpStack { *; }
 -keepattributes Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable
+-keepnames class local.headunit.diplay.**
+-keepclassmembernames class local.headunit.diplay.** { *; }
+-keepnames class com.shilapi.xcertplay.**
+-keepclassmembernames class com.shilapi.xcertplay.** { *; }
 -keepnames class * extends java.lang.Throwable
 -dontwarn org.jetbrains.annotations.**
 -dontwarn javax.naming.**
@@ -13,6 +18,9 @@
 -dontwarn org.slf4j.**
 
 -keep class local.headunit.diplay.AutoUsbService { *; }
+-keep class local.headunit.diplay.UsbAttachActivity { *; }
+-keep class local.headunit.diplay.DiPlayApplication { *; }
+-keep class local.headunit.diplay.CrashEvidence { *; }
 -keep class local.headunit.diplay.AutoBootReceiver { *; }
 -keep class local.headunit.diplay.MediaButtonWheelReceiver { *; }
 

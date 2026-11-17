@@ -5,8 +5,9 @@ object VerifiedMfiCache {
  private var prepared:PreparedValue<LocalMfiAuthenticationClient>?=null
  @Synchronized private fun value(c:Context):PreparedValue<LocalMfiAuthenticationClient>{
   prepared?.let{return it};val app=c.applicationContext
-  return PreparedValue{LocalMfiAuthenticationClient.load(PlatformSupport.prepareMfi(app)).also{runCatching{IdentityStore(app).loadPair()?.let{LegacyTlsChannel.prepare(it)}}}}.also{prepared=it}
+  return PreparedValue{LocalMfiAuthenticationClient.load(PlatformSupport.prepareMfi(app)).also{runCatching{ConnectionPrewarm.identityStore(app).loadPair()?.let{LegacyTlsChannel.prepare(it)}}}}.also{prepared=it}
  }
- @JvmStatic fun warm(c:Context){value(c).warm()}
+ @JvmStatic fun warm(c:Context){runCatching{value(c).warm()}}
+ @JvmStatic @Synchronized fun ready():Boolean=prepared?.completedValue()!=null
  fun get(c:Context,onSignature:(Int)->Unit)=value(c).get().withSignatureObserver(onSignature)
 }

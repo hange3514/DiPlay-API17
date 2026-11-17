@@ -30,7 +30,7 @@ object IphoneCarPlayConfiguration {
 
     fun find(device: UsbDevice): UsbConfiguration? {
         val configurations = LegacyUsb.configurations(device)
-        val chosen = configurations.firstOrNull { usbMuxInterface(it) != null && hasCdcNcm(it) && hasAppleEthernet(it) }
+        val chosen = configurations.firstOrNull(::isCarPlayMode)
             ?: configurations.firstOrNull { usbMuxInterface(it) != null && hasCdcNcm(it) }
         Log.i(
             TAG,
@@ -39,6 +39,10 @@ object IphoneCarPlayConfiguration {
         )
         return chosen
     }
+
+    /** Apple Ethernet is the descriptor-level signal that the phone selected CarPlay USB mode. */
+    fun isCarPlayMode(configuration: UsbConfiguration): Boolean =
+        usbMuxInterface(configuration) != null && hasCdcNcm(configuration) && hasAppleEthernet(configuration)
 
     fun describe(configuration: UsbConfiguration): String =
         (0 until configuration.interfaceCount).joinToString(",") { index ->

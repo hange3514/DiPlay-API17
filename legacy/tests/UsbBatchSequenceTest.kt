@@ -33,5 +33,5 @@ class UsbBatchSequenceTest {
   assertEquals(12,groups.size)
  }
  @Test fun endedConnectionCannotPassEvenWithStaleReady(){val s=UsbBatchSequence(0);poll(s,0);poll(s,1200);poll(s,1300,true,true);assertEquals(UsbBatchSequence.CAPTURE,poll(s,4000,ready=true,ended=true));assertFalse(s.success())}
- @Test fun profilesVaryOnlyIntendedFactor(){assertFalse(UsbStartupProfile.queued(1));assertTrue(UsbStartupProfile.queued(0));assertTrue(UsbStartupProfile.waitCarrier(2));assertTrue(UsbStartupProfile.waitCarrier(4));assertFalse(UsbStartupProfile.refreshFilter(2));assertTrue(UsbStartupProfile.refreshFilter(4));assertTrue(UsbStartupProfile.resetAlternate(3));for(p in listOf(-1,11,999))assertEquals(0,UsbStartupProfile.valid(p))}
+ @Test fun profilesVaryOnlyIntendedFactor(){assertFalse(UsbStartupProfile.queued(1));assertTrue(UsbStartupProfile.queued(0));assertTrue(UsbStartupProfile.queuedPreSessionWarmup(UsbStartupProfile.DEFAULT));assertFalse(UsbStartupProfile.queuedPreSessionWarmup(1));assertTrue(UsbStartupProfile.waitCarrier(2));assertTrue(UsbStartupProfile.waitCarrier(4));assertFalse(UsbStartupProfile.refreshFilter(2));assertTrue(UsbStartupProfile.refreshFilter(4));assertTrue(UsbStartupProfile.resetAlternate(3));for(p in listOf(-1,11,999))assertEquals(0,UsbStartupProfile.valid(p))}
 }

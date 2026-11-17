@@ -3,6 +3,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import com.shilapi.xcertplay.airplay.AudioStreamId
 class DiagnosticPolicyTest {
+ @Test fun userlandNetworkMilestonesAndCountersSurviveEviction(){for(s in listOf("NETWORK_BACKEND_SELECTED {backend=lwip_userland_ncm}", "NETWORK_LISTENER {backend=lwip}", "USERLAND_NETWORK userland stack ready backend=lwIP", "USERLAND_NETWORK userland stats rxUsbFrames=4 rxTcp=1 txUsbOk=2", "USERLAND_NETWORK userland stack stopped rxUsbFrames=4"))assertFalse(s,DiagnosticPolicy.routine(s))}
  @Test fun startupPacketFloodIsEvictableButMilestonesRemain(){assertTrue(DiagnosticPolicy.routine("USB_NETWORK ncm outbound ipv6Bytes=48"));assertFalse(DiagnosticPolicy.routine("USB_NETWORK ncm first outbound ipv6 bytes=48"));assertFalse(DiagnosticPolicy.routine("USB_NETWORK failed ncm outbound ipv6Bytes=48"))}
  @Test fun navigationAndMusicDoNotFormatEveryPacket(){assertTrue(DiagnosticPolicy.skipFrame(0x5001));assertTrue(DiagnosticPolicy.skipFrame(0x5201));assertFalse(DiagnosticPolicy.skipFrame(0xAA00))}
  @Test fun legacyFloodCanBeEvicted(){assertTrue(DiagnosticPolicy.routine("IAP2 RX NowPlayingUpdate"));assertTrue(DiagnosticPolicy.routine("CONTROL iap2 rx=0x5201"))}

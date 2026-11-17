@@ -52,7 +52,11 @@ object AirPlayInfoPlist {
             info["audioLatencies"] = audioLatencies()
             info["audioFormats"] = audioFormats(config.entertainmentSampleRate, config.microphone, config.mainBufferedAudio)
         }
-        info["extendedFeatures"] = listOf("vocoderInfo", "enhancedRequestCarUI")
+        // This receiver has no OEM home-screen to switch to. Advertising enhancedRequestCarUI
+        // makes iOS offer a vehicle tile that this API 17 app cannot service.
+        info["extendedFeatures"] = listOf("vocoderInfo")
+        // Explicit false also lets iOS clear a previously cached OEM return-to-car tile.
+        info["oemIconVisible"] = false
         info["displays"] = displays
         info["hidDevices"] = listOf(
             AirPlayHid.touchHidDevice(config.main.widthPixels, config.main.heightPixels, MAIN_UUID),
@@ -60,18 +64,6 @@ object AirPlayInfoPlist {
             AirPlayHid.mediaHidDevice(MAIN_UUID),
             AirPlayHid.telephonyHidDevice(MAIN_UUID),
         )
-        if (config.icons.isNotEmpty()) {
-            info["oemIconVisible"] = true
-            info["oemIconLabel"] = config.oemLabel
-            info["oemIcons"] = config.icons.map { icon ->
-                linkedMapOf(
-                    "imageData" to icon.data,
-                    "widthPixels" to icon.widthPixels,
-                    "heightPixels" to icon.heightPixels,
-                    "prerendered" to true,
-                )
-            }
-        }
         if (config.hevc) info["hevcInfo"] = emptyMap<String, Any?>()
         // With the mainBuffered session feature the iPhone requires this key; an empty dictionary is accepted.
         if (config.bufferedAudioOutputEnabled) info["mainBufferedInfo"] = emptyMap<String, Any?>()

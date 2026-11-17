@@ -1,0 +1,38 @@
+﻿# DiPlay 0.44.49-usb-reattach-focus-beta
+
+## 版本信息
+
+- 版本号：`0.44.49-usb-reattach-focus-beta`（versionCode 184）
+- 平台：Android API 17；已知目标车机为 Freescale MX9A0 / Android 4.2.2 / 1024×600。
+- 已知测试组合：比亚迪宋 DM 2017 款、iPhone 15 Pro Max / iOS 26.2.1。**0.44.49 尚未完成实车验证，且没有在其他车型或车机上测试。**
+- APK：`DiPlay_API17_0.44.49-usb-reattach-focus-beta.apk`
+- SHA-256：`6abd0ed5c1f4f303ed99fd18010f7a0f5d819316ea725fcb70b196b6bb90a3ed`
+
+## 更新内容
+
+### 本版修复
+
+USB 切换到 CarPlay 模式时，iPhone 可能重新枚举为新的 USB 设备。旧流程会继续等旧对象的授权；同时系统默认 USB 处理 Activity 可能显示全屏等待界面，盖住真正的授权提示。本版在等待授权时重新查找当前 Apple USB 设备，并避免两个 Activity 同时抢授权流程和焦点。
+
+这项修复意在减少授权/重枚举导致的卡住和额外等待，并改善系统 USB 授权框的可见性；没有跳过 CarKit/MFi 认证。认证握手与首帧时间仍需实车验证，因此不承诺所有场景都能达到某个固定连接秒数。
+
+### 此版本继续包含的既有改进
+
+- **不再弹 VPN 授权框：**此前网络层已切换到应用内 lwIP 用户态 IPv6/TCP/UDP 处理，正常投屏连接不再创建 Android VPN。
+- **通话麦克风音质：**保留 0.44.48 加入的电话麦克风低延迟滤波，包括约 90 Hz 高通和柔和扩展器，用于降低低频风噪/轰鸣与语音间隙底噪。它只处理电话麦克风上行，不改变已采用的音频路由，也不处理 CarPlay 媒体、导航或电话下行。
+- **界面：**保留启动过渡动画、连接进度展示、返回后的控制面板优化。
+- **连接耗时：**保留此前启动预热和自动连接改进；本版主要避免 USB 授权竞争导致的长等待。CarKit/MFi 握手本身仍是耗时阶段，尚无证据说明本版能缩短其协议耗时。
+
+## 安装与验证
+
+从 GitHub Releases 下载 APK，在车机安装。若 Android 提示 USB 设备访问权限，按系统提示允许 DiPlay 访问 iPhone；系统弹窗的按钮不要被应用界面遮挡。
+
+实车验证建议一次完成：车机冷启动后插入 iPhone，记录插入到 CarPlay 首帧的大致秒数、USB 授权框出现次数及是否能正常点击、最终是否成功出画面。然后提交一份日志并在问题描述中填写这些结果。当前版本重点验证 USB 重枚举/授权等待；无需重复测试已经正常的音频路由。
+
+## 文件校验
+
+```text
+6abd0ed5c1f4f303ed99fd18010f7a0f5d819316ea725fcb70b196b6bb90a3ed  DiPlay_API17_0.44.49-usb-reattach-focus-beta.apk
+```
+
+对应源码快照在仓库 `legacy/`。源码不包含签名密钥、私人服务器令牌或离线 MFi 身份文件；APK 中的附件认证材料来源与限制见 [`AUTH_PROVENANCE.md`](AUTH_PROVENANCE.md)。

@@ -24,6 +24,7 @@ class Iap2UsbMuxHost private constructor(
     private var nextMuxSequence = 0
     private var nextMuxAcknowledgement = 0
     private var nextSourcePort = FIRST_SOURCE_PORT
+    private var writeDiagnosticBudget = 64
     private lateinit var readerThread: Thread
     private val receiveFrames = UsbMuxFrameBuffer { line ->
         Log.w("xcertplay-usb", line)
@@ -195,11 +196,39 @@ class Iap2UsbMuxHost private constructor(
         putU16(frame, 12, sequenceAndAcknowledgement.first)
         putU16(frame, 14, sequenceAndAcknowledgement.second)
         payload.copyInto(frame, MUX_HEADER_BYTES)
+        val writeStartedAtNanos = System.nanoTime()
+        var writeCompleted = false
+        var writeFailure = "none"
         try {
             pipe.write(frame, WRITE_TIMEOUT_MILLIS)
-        } catch (error: IphoneUsbException) {
-            fail(error)
+            writeCompleted = true
+        } catch (error: Exception) {
+            writeFailure = error.javaClass.simpleName
+            if (error is IphoneUsbException) fail(error)
             throw error
+        } finally {
+            val durationMillis = (System.nanoTime() - writeStartedAtNanos) / NANOS_PER_MILLISECOND
+            if (writeDiagnosticBudget > 0 || durationMillis >= SLOW_WRITE_LOG_MILLIS) {
+                if (writeDiagnosticBudget > 0) writeDiagnosticBudget--
+                val tcpDetails = if (protocol == PROTOCOL_TCP && payload.size >= TCP_HEADER_BYTES) {
+                    val headerBytes = ((payload[12].toInt() ushr 4) and 0x0f) * 4
+                    if (headerBytes in TCP_HEADER_BYTES..payload.size) {
+                        " tcpSourcePort=${readU16(payload, 0)} tcpDestinationPort=${readU16(payload, 2)} " +
+                            "tcpFlags=0x${(payload[13].toInt() and 0xff).toString(16).padStart(2, '0')} " +
+                            "tcpPayloadBytes=${payload.size - headerBytes}"
+                    } else {
+                        " tcpHeaderValid=false"
+                    }
+                } else ""
+                runCatching {
+                    onDiagnostic(
+                        "USBMUX_OUT protocol=0x${protocol.toString(16).padStart(8, '0')} " +
+                            "payloadBytes=${payload.size} transferBytes=${frame.size} " +
+                            "durationMs=$durationMillis result=${if (writeCompleted) "bulk_transfer_complete" else "failed:$writeFailure"}" +
+                            tcpDetails,
+                    )
+                }
+            }
         }
         synchronized(stateLock) {
             nextMuxSequence = (nextMuxSequence + 1) and 0xffff
@@ -286,6 +315,7 @@ class Iap2UsbMuxHost private constructor(
         private const val MAX_STALE_HANDSHAKE_FRAMES = 32
         private const val CONNECT_TIMEOUT_MILLIS = 5_000L
         private const val WRITE_TIMEOUT_MILLIS = 2_000
+        private const val SLOW_WRITE_LOG_MILLIS = 100L
         private const val CLOSE_JOIN_MARGIN_MILLIS = 100L
 
         /** Performs the USBMUX v2 handshake and starts the framed reader. */
@@ -333,7 +363,7 @@ class Iap2UsbMuxTcpConnection internal constructor(
     private val host: Iap2UsbMuxHost,
     internal val sourcePort: Int,
     private val destinationPort: Int,
-) : BlockingDuplexByteStream {
+) : WakeableBlockingDuplexByteStream {
     private val stateLock = Object()
     private val writeLock = Any()
     private val received = ArrayDeque<ByteArray>()
@@ -341,6 +371,7 @@ class Iap2UsbMuxTcpConnection internal constructor(
     private var nextAcknowledgement = 0
     private var connected = false
     private var closed = false
+    private var receiveWakePending = false
     private var failure: IphoneUsbException? = null
     private var sequenceMismatchLogs = 0
 
@@ -379,7 +410,7 @@ class Iap2UsbMuxTcpConnection internal constructor(
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
         val deadline = System.nanoTime() + timeoutMillis * NANOS_PER_MILLISECOND
         synchronized(stateLock) {
-            while (received.isEmpty() && !closed) {
+            while (received.isEmpty() && !closed && !receiveWakePending) {
                 val remainingNanos = deadline - System.nanoTime()
                 if (remainingNanos <= 0) return null
                 try {
@@ -390,6 +421,10 @@ class Iap2UsbMuxTcpConnection internal constructor(
                 }
             }
             failure?.let { throw it }
+            if (received.isEmpty() && receiveWakePending && !closed) {
+                receiveWakePending = false
+                return null
+            }
             if (received.isEmpty()) {
                 return ByteArray(0)
             }
@@ -400,6 +435,14 @@ class Iap2UsbMuxTcpConnection internal constructor(
                 received.addFirst(packet.copyOfRange(maxBytes, packet.size))
                 packet.copyOf(maxBytes)
             }
+        }
+    }
+
+    /** Wakes a protocol reader blocked on this connection's receive queue. */
+    override fun wakeReceiver() = synchronized(stateLock) {
+        if (!closed) {
+            receiveWakePending = true
+            stateLock.notifyAll()
         }
     }
 

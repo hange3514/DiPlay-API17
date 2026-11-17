@@ -44,12 +44,13 @@ public final class CallDuplexAB {
  private static void resetLocked(long now,Context context){RING.clear();armed=true;attempted=true;probeArmed=true;callSetupAt=0;downlinkStartedAt=0;deadline=now+TimeUnit.MINUTES.toMillis(10);packets=0;bytes=0;rate=0;channels=0;firstSample=0;lastSample=0;lastStage=-3;lastToneStage=-1;stageRows=new JSONArray();evidence=new PcmEvidence();if(context!=null)appContext=context.getApplicationContext();}
 
  public static void callStreamStarting(Context context){
-  boolean started=false,autoArmed=false;long now=SystemClock.elapsedRealtime();
+  boolean started=false;long now=SystemClock.elapsedRealtime();
   synchronized(LOCK){
-   if(!armed&&!RING.hasUsefulAudio()){resetLocked(now,context);autoArmed=true;}
+   // A normal call must never start the diagnostic A/B schedule. It changes
+   // microphone capture/source and injects marker tones. Only arm() from the
+   // explicit diagnostic UI may enable that behavior.
    if(probeArmed&&armed&&callSetupAt==0){callSetupAt=now;started=true;}
   }
-  if(autoArmed)try{record(context,"CALL_DUPLEX_TEST_ARM",new JSONObject().put("trigger","auto_call_stream").put("timeline","mic_off_5s_on_vc_8s_on_mic_8s_off_5s").put("callDownlinkUnaffected",true).put("captureMaxSeconds",CAPTURE_SECONDS).put("rawDownlinkStoredOnDevice",false).put("rawAudioUploadRequiresManualSubmit",true));}catch(Exception ignored){}
   if(started)try{record(context,"CALL_DUPLEX_STREAM_START",new JSONObject().put("micHeldUntilDownlinkPcm",true).put("waitLimitMs",WAIT_FOR_DOWNLINK_MS).put("stream","telephony"));}catch(Exception ignored){}
  }
 

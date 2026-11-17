@@ -1,8 +1,8 @@
-from pathlib import Path
+﻿from pathlib import Path
 import os, re, subprocess, sys, zipfile, shutil
 
 ROOT=Path(__file__).resolve().parent
-TC=ROOT.parents[2]/'toolchain'
+TC=ROOT.parents[1]/'toolchain'
 JAVA=next((TC/'jdk21').glob('*/bin/java.exe'))
 BUILD=ROOT/'build'; BUILD.mkdir(exist_ok=True)
 def run(cmd, name):
@@ -21,31 +21,33 @@ def compile_kotlin(files, output, extra=(), platform='android17.jar'):
     argfile=BUILD/'kotlin.args';argfile.write_text('\n'.join('"'+s.replace('\\','/')+'"' for s in args),'utf-8')
     run([JAVA,'-Dfile.encoding=UTF-8','-Xmx2g','-cp',TC/'*','org.jetbrains.kotlin.cli.jvm.K2JVMCompiler','@'+str(argfile)],'compile')
 if __name__=='__main__':
+    native=BUILD/'libdiplayusb.so'
     if '--package-only' not in sys.argv:
-        native=BUILD/'libdiplayusb.so'
-        preserved=ROOT/'native/libdiplayusb-0.53.31.so'
-        force_native='--rebuild-native' in sys.argv
-        if preserved.is_file() and not force_native:
-            shutil.copyfile(preserved,native)
-            print('native preserved from 0.53.31',flush=True)
-        else:
-            # JNI's C declarations use no stdio types. Keep its complete ABI/header
-            # and copyright, omitting that unused include for this sysroot-free build.
-            jni=(JAVA.parents[1]/'include/jni.h').read_text(encoding='utf-8')
-            (BUILD/'jni.h').write_text(jni.replace('#include <stdio.h>', '/* Unused stdio include omitted by legacy/build.py. */'),encoding='utf-8')
-            run([TC/'zig/ziglang/zig.exe','cc','-target','arm-linux-android','-mcpu=cortex_a9','-mfloat-abi=softfp','-O2','-fno-vectorize','-fno-slp-vectorize','-ffreestanding','-fPIC','-fvisibility=hidden','-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-fno-stack-protector','-fno-unwind-tables','-fno-asynchronous-unwind-tables','-nostdlib','-shared','-I',ROOT/'native','-I',BUILD,'-Wl,--hash-style=sysv','-Wl,-soname,libdiplayusb.so',ROOT/'native/usb.c',ROOT/'native/startup_usb.c',ROOT/'native/crypto.c',ROOT/'native/monocypher/monocypher.c',ROOT/'native/alsa_probe.c',TC/'libc-api17-arm.so','-o',native],'native')
-        compile_kotlin(sorted((ROOT/'src').rglob('*.kt'))+sorted((ROOT/'src').rglob('*.java')),BUILD/'core.jar')
-        classes=BUILD/'java'
-        assert classes.resolve()==(ROOT/'build/java').resolve()
-        if classes.exists():shutil.rmtree(classes)
-        classes.mkdir()
-        cp=os.pathsep.join(str(x) for x in [BUILD/'core.jar',TC/'android17.jar',TC/'kotlin-stdlib.jar'])
-        run([JAVA.with_name('javac.exe'),'-encoding','UTF-8','-source','8','-target','8','-bootclasspath',TC/'android17.jar','-classpath',cp,'-d',classes,*sorted((ROOT/'src').rglob('*.java'))],'javac')
-        with zipfile.ZipFile(BUILD/'java.jar','w') as z:
-            for f in classes.rglob('*.class'):z.write(f,f.relative_to(classes).as_posix())
-        dex=BUILD/'dex';dex.mkdir(exist_ok=True)
-        run([JAVA,'-Xmx3g','-cp',TC/'r8.jar','com.android.tools.r8.R8','--release','--min-api','17','--lib',TC/'android17.jar','--pg-conf',ROOT/'proguard.pro','--output',dex,'--pg-map-output',BUILD/'mapping.txt',BUILD/'core.jar',BUILD/'java.jar',TC/'kotlin-stdlib.jar',TC/'annotations.jar',TC/'bcprov.jar',TC/'bctls.jar',TC/'bcutil.jar',TC/'jmdns.jar'],'r8')
-    workspace=ROOT.parents[4];bt=workspace/'headunit-probe/tools/build-tools/android-11'
+        # This branch's NativeIpStack JNI bindings and lwIP sources are required at runtime.
+        # Never silently substitute the older 0.53.31 native library, which lacks them.
+        # JNI's C declarations use no stdio types. Keep its complete ABI/header and copyright,
+        # omitting that unused include for this sysroot-free build.
+        jni=(JAVA.parents[1]/'include/jni.h').read_text(encoding='utf-8')
+        (BUILD/'jni.h').write_text(jni.replace('#include <stdio.h>', '/* Unused stdio include omitted by legacy/build.py. */'),encoding='utf-8')
+        lwip=ROOT/'native/lwip'
+        lwip_sources=sorted((lwip/'src/core').rglob('*.c'))+sorted((lwip/'src/api').glob('*.c'))+[lwip/'src/netif/ethernet.c',ROOT/'native/userland/sys_arch_android_api17.c']
+        run([TC/'zig/ziglang/zig.exe','cc','-target','arm-linux-android','-D__ANDROID_API__=17','-U__ANDROID__','-mcpu=cortex_a9','-mfloat-abi=softfp','-O2','-fno-vectorize','-fno-slp-vectorize','-fPIC','-fvisibility=hidden','-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-Wl,--no-undefined','-fno-stack-protector','-fno-unwind-tables','-fno-asynchronous-unwind-tables','-nostdlib','-shared','-I',ROOT/'native','-I',BUILD,'-I',ROOT/'native/userland','-I',lwip/'src/include','-I',lwip/'contrib/ports/unix/port/include','-idirafter',TC/'zig/ziglang/lib/libc/include/generic-musl','-idirafter',TC/'zig/ziglang/lib/libc/include/arm-linux-musl','-idirafter',TC/'zig/ziglang/lib/libc/include/any-linux-any','-Wl,--hash-style=sysv','-Wl,-soname,libdiplayusb.so',ROOT/'native/usb.c',ROOT/'native/startup_usb.c',ROOT/'native/crypto.c',ROOT/'native/monocypher/monocypher.c',ROOT/'native/alsa_probe.c',*lwip_sources,ROOT/'native/userland/lwip_jni.c',TC/'libc-api17-arm.so','-o',native],'native')
+    if not native.is_file() or b'Java_local_headunit_diplay_NativeIpStack_create' not in native.read_bytes():
+        raise SystemExit('Refusing to package native library without this branch\'s lwIP JNI entry point')
+    compile_kotlin(sorted((ROOT/'src').rglob('*.kt'))+sorted((ROOT/'src').rglob('*.java')),BUILD/'core.jar')
+    classes=BUILD/'java'
+    assert classes.resolve()==(ROOT/'build/java').resolve()
+    if classes.exists():shutil.rmtree(classes)
+    classes.mkdir()
+    cp=os.pathsep.join(str(x) for x in [BUILD/'core.jar',TC/'android17.jar',TC/'kotlin-stdlib.jar'])
+    run([JAVA.with_name('javac.exe'),'-encoding','UTF-8','-source','8','-target','8','-bootclasspath',TC/'android17.jar','-classpath',cp,'-d',classes,*sorted((ROOT/'src').rglob('*.java'))],'javac')
+    with zipfile.ZipFile(BUILD/'java.jar','w') as z:
+        for f in classes.rglob('*.class'):z.write(f,f.relative_to(classes).as_posix())
+    dex=BUILD/'dex'
+    if dex.exists():shutil.rmtree(dex)
+    dex.mkdir()
+    run([JAVA,'-Xmx3g','-cp',TC/'r8.jar','com.android.tools.r8.R8','--release','--min-api','17','--lib',TC/'android17.jar','--pg-conf',ROOT/'proguard.pro','--output',dex,'--pg-map-output',BUILD/'mapping.txt',BUILD/'core.jar',BUILD/'java.jar',TC/'kotlin-stdlib.jar',TC/'annotations.jar',TC/'bcprov.jar',TC/'bctls.jar',TC/'bcutil.jar',TC/'jmdns.jar'],'r8')
+    workspace=ROOT.parents[3];bt=workspace/'headunit-probe/tools/build-tools/android-11'
     res=BUILD/'res';res.mkdir(exist_ok=True)
     run([bt/'aapt.exe','package','-f','-M',ROOT/'AndroidManifest.xml','-S',res,'-S',ROOT/'res','-A',ROOT/'assets','-I',workspace/'headunit-probe/tools/platform/android-4.4.2/android.jar','-F',BUILD/'unsigned.apk'],'aapt')
     with zipfile.ZipFile(BUILD/'unsigned.apk','a',compression=zipfile.ZIP_DEFLATED) as z:

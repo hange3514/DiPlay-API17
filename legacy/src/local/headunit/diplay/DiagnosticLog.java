@@ -8,6 +8,8 @@ import org.json.*;
 
 /** Immutable serialized entries; protocol threads never wait for fsync or rescan JSON text. */
 final class DiagnosticLog {
+ private static final int MAX_ROWS=4000,MAX_BYTES=2000000;
+ private static final long RETENTION_MS=86400000L;
  private static final class Entry {
   final String id,line;final long time;final byte[] encoded;final boolean routine;
   Entry(JSONObject r)throws Exception{id=r.getString("id");time=r.getLong("time");line=r.toString();encoded=(line+"\n").getBytes("UTF-8");routine=DiagnosticPolicy.routine(r.optString("event"));}
@@ -19,11 +21,12 @@ final class DiagnosticLog {
   if(loaded)return;context=c.getApplicationContext();File f=new File(context.getFilesDir(),"events.jsonl");
   if(f.exists()||new File(f.getPath()+".bak").exists()){
    BufferedReader in=new BufferedReader(new InputStreamReader(new AtomicFile(f).openRead(),"UTF-8"));try{String line;while((line=in.readLine())!=null){try{Entry r=new Entry(new JSONObject(line));rows.add(r);bytes+=r.encoded.length;trim();}catch(JSONException ignored){}}}finally{in.close();}
-  }loaded=true;trim();expireExport();disk.scheduleAtFixedRate(new Runnable(){public void run(){try{synchronized(DiagnosticLog.class){trim();}expireExport();persistSnapshot();}catch(Exception e){android.util.Log.e("DiPlayLog","Retention cleanup failed",e);}}},1,1,TimeUnit.HOURS);
+  }loaded=true;trim();expireExport();disk.scheduleAtFixedRate(new Runnable(){public void run(){try{synchronized(DiagnosticLog.class){trim();}expireExport();persistSnapshot();}catch(Exception e){android.util.Log.e("DiPlayLog","Retention cleanup failed",e);}}},15,15,TimeUnit.MINUTES);
  }
  private static void expireExport(){if(context!=null)UsbBatchReport.expire(context);ReportIo.expireBackup(new File(android.os.Environment.getExternalStorageDirectory(),"DiPlayCompat"),System.currentTimeMillis());}
- private static void trim(){long cutoff=System.currentTimeMillis()-86400000L;for(Iterator<Entry> it=rows.iterator();it.hasNext();){Entry r=it.next();if(r.time<cutoff){bytes-=r.encoded.length;it.remove();}}while(rows.size()>400||bytes>150000){int drop=0;for(int n=0;n<rows.size();n++)if(rows.get(n).routine){drop=n;break;}bytes-=rows.remove(drop).encoded.length;}}
+ private static void trim(){long cutoff=System.currentTimeMillis()-RETENTION_MS;for(Iterator<Entry> it=rows.iterator();it.hasNext();){Entry r=it.next();if(r.time<cutoff){bytes-=r.encoded.length;it.remove();}}while(rows.size()>MAX_ROWS||bytes>MAX_BYTES){int drop=-1;for(int n=0;n<rows.size();n++)if(rows.get(n).routine){drop=n;break;}if(drop<0)drop=0;bytes-=rows.remove(drop).encoded.length;}}
  static synchronized void record(Context c,String name,JSONObject detail)throws Exception {load(c);Entry r=new Entry(new JSONObject().put("id",UUID.randomUUID().toString()).put("time",System.currentTimeMillis()).put("event",name+" "+detail.toString()));rows.add(r);bytes+=r.encoded.length;trim();schedule();}
+ static void recordImmediately(Context c,String name,JSONObject detail)throws Exception {record(c,name,detail);persistSnapshot();}
  private static void schedule(){if(queued)return;queued=true;disk.schedule(new Runnable(){public void run(){synchronized(DiagnosticLog.class){queued=false;}try{persistSnapshot();}catch(Exception e){android.util.Log.e("DiPlayLog","Log persistence failed",e);}}},300,TimeUnit.MILLISECONDS);}
  static JSONArray snapshot(Context c)throws Exception {List<Entry> copy;synchronized(DiagnosticLog.class){load(c);trim();copy=new ArrayList<Entry>(rows);}JSONArray result=new JSONArray();for(Entry r:copy)result.put(new JSONObject(r.line));return result;}
  static void acknowledge(Context c,JSONArray sent)throws Exception {
@@ -35,8 +38,10 @@ final class DiagnosticLog {
   }
   durable.get();
  }
+ private static final Object persistenceLock=new Object();
  private static void persistSnapshot()throws Exception {
-  List<Entry> copy;Context c;synchronized(DiagnosticLog.class){copy=new ArrayList<Entry>(rows);c=context;}
-  AtomicFile f=new AtomicFile(new File(c.getFilesDir(),"events.jsonl"));FileOutputStream out=f.startWrite();try{for(Entry r:copy)out.write(r.encoded);f.finishWrite(out);}catch(Exception e){f.failWrite(out);throw e;}
+  synchronized(persistenceLock){List<Entry> copy;Context c;synchronized(DiagnosticLog.class){copy=new ArrayList<Entry>(rows);c=context;}
+   AtomicFile f=new AtomicFile(new File(c.getFilesDir(),"events.jsonl"));FileOutputStream out=f.startWrite();try{for(Entry r:copy)out.write(r.encoded);f.finishWrite(out);}catch(Exception e){f.failWrite(out);throw e;}
+  }
  }
 }

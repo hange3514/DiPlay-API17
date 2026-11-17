@@ -22,7 +22,11 @@ class Iap2LinkChannel private constructor(
     private val initiateNegotiation: Boolean,
     private val onArtwork: (Iap2ArtworkTransfer) -> Unit,
 ) : java.io.Closeable {
-    private data class Command(val sessionId: Int, val payload: ByteArray)
+    private data class Command(
+        val sessionId: Int,
+        val payload: ByteArray,
+        val flushReceipt: Iap2TransportFlushReceipt? = null,
+    )
 
     private val lock = Object()
     private val commands = ArrayDeque<Command>()
@@ -68,10 +72,12 @@ class Iap2LinkChannel private constructor(
             "iAP2 control payload exceeds ${Iap2LinkEngine.MAX_PAYLOAD_BYTES} bytes"
         }
         val copy = bytes.copyOf()
-        synchronized(lock) {
+        val queued = synchronized(lock) {
             if (terminated || closing) return false
-            return enqueueCommandLocked(Iap2LinkEngine.CONTROL_SESSION_ID, copy)
+            enqueueCommandLocked(Iap2LinkEngine.CONTROL_SESSION_ID, copy)
         }
+        if (queued) wakeReceiverForPendingWork()
+        return queued
     }
 
     /**
@@ -84,13 +90,45 @@ class Iap2LinkChannel private constructor(
         }
         require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
         val copy = bytes.copyOf()
-        synchronized(lock) {
+        val queued = synchronized(lock) {
             waitFor(timeoutMillis) {
                 terminated || closing || hasCommandCapacityLocked(copy.size)
             }
             throwTerminalFailureLocked()
             if (terminated || closing) return false
-            return enqueueCommandLocked(Iap2LinkEngine.CONTROL_SESSION_ID, copy)
+            enqueueCommandLocked(Iap2LinkEngine.CONTROL_SESSION_ID, copy)
+        }
+        if (queued) wakeReceiverForPendingWork()
+        return queued
+    }
+
+    /**
+     * Queues one control payload and waits until its iAP2 bytes have been accepted by the
+     * underlying transport's synchronous send call. This is used for the wired StartSession
+     * handoff, where opening NCM outbound before 0x4301 reaches USB can race the phone's bring-up.
+     */
+    internal fun sendControlAwaitTransportFlush(bytes: ByteArray, timeoutMillis: Long): Boolean {
+        require(bytes.size <= Iap2LinkEngine.MAX_PAYLOAD_BYTES) {
+            "iAP2 control payload exceeds ${Iap2LinkEngine.MAX_PAYLOAD_BYTES} bytes"
+        }
+        require(timeoutMillis >= 0) { "timeoutMillis must not be negative" }
+        val copy = bytes.copyOf()
+        val deadlineNanos = deadlineAfter(timeoutMillis)
+        val receipt = Iap2TransportFlushReceipt()
+        val queued = synchronized(lock) {
+            waitFor(remainingMillis(deadlineNanos)) {
+                terminated || closing || hasCommandCapacityLocked(copy.size)
+            }
+            throwTerminalFailureLocked()
+            if (terminated || closing || !hasCommandCapacityLocked(copy.size)) return false
+            enqueueCommandLocked(Iap2LinkEngine.CONTROL_SESSION_ID, copy, receipt)
+        }
+        if (!queued) return false
+        wakeReceiverForPendingWork()
+        synchronized(lock) {
+            waitFor(remainingMillis(deadlineNanos)) { receipt.flushed || terminated }
+            throwTerminalFailureLocked()
+            return receipt.flushed && !terminated
         }
     }
 
@@ -188,14 +226,26 @@ class Iap2LinkChannel private constructor(
                     }
                 }
             } ?: return
-            engine.sendSession(command.sessionId, command.payload, nowMillis())
+            if (command.flushReceipt == null) {
+                engine.sendSession(command.sessionId, command.payload, nowMillis())
+            } else {
+                engine.sendSessionTracked(command.sessionId, command.payload, nowMillis(), command.flushReceipt)
+            }
             if (isClosing()) return
         }
     }
 
     private fun flush(engine: Iap2LinkEngine) {
-        val bytes = engine.takeOutput()
-        if (bytes.isNotEmpty()) underlying.send(bytes)
+        val batch = engine.takeOutputBatch()
+        if (batch.bytes.isEmpty()) {
+            check(batch.completedFlushReceipts.isEmpty()) { "iAP2 flush receipt has no corresponding output bytes" }
+            return
+        }
+        underlying.send(batch.bytes)
+        if (batch.completedFlushReceipts.isNotEmpty()) synchronized(lock) {
+            batch.completedFlushReceipts.forEach { it.flushed = true }
+            lock.notifyAll()
+        }
     }
 
     /** Returns false when a link terminal event has been observed. */
@@ -291,6 +341,10 @@ class Iap2LinkChannel private constructor(
 
     private fun isClosing(): Boolean = synchronized(lock) { closing || terminated }
 
+    private fun wakeReceiverForPendingWork() {
+        (underlying as? WakeableBlockingDuplexByteStream)?.wakeReceiver()
+    }
+
     private fun closeUnderlyingOnce(): Throwable? {
         synchronized(lock) {
             if (streamCloseStarted) return null
@@ -309,12 +363,25 @@ class Iap2LinkChannel private constructor(
         commands.size < MAX_PENDING_COMMANDS && bytes <= MAX_PENDING_COMMAND_BYTES - commandBytes
 
     /** lock must already be held. */
-    private fun enqueueCommandLocked(sessionId: Int, bytes: ByteArray): Boolean {
+    private fun enqueueCommandLocked(
+        sessionId: Int,
+        bytes: ByteArray,
+        flushReceipt: Iap2TransportFlushReceipt? = null,
+    ): Boolean {
         if (!hasCommandCapacityLocked(bytes.size)) return false
-        commands += Command(sessionId, bytes)
+        commands += Command(sessionId, bytes, flushReceipt)
         commandBytes += bytes.size
         lock.notifyAll()
         return true
+    }
+
+    private fun deadlineAfter(timeoutMillis: Long): Long =
+        System.nanoTime() + timeoutMillis.coerceAtMost(MAX_WAIT_MILLIS) * NANOS_PER_MILLISECOND
+
+    private fun remainingMillis(deadlineNanos: Long): Long {
+        val remainingNanos = deadlineNanos - System.nanoTime()
+        if (remainingNanos <= 0) return 0
+        return (remainingNanos + NANOS_PER_MILLISECOND - 1) / NANOS_PER_MILLISECOND
     }
 
     /** lock must already be held. */
