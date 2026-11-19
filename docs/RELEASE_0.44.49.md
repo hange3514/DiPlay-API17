@@ -1,10 +1,10 @@
-﻿# DiPlay 0.44.49 有线正式版
+# DiPlay 0.44.49 有线正式版
 
 ## 版本信息
 
 - 版本号：`0.44.49-usb-reattach-focus-beta`（versionCode 184）
 - 平台：Android API 17；已知目标车机为 Freescale MX9A0 / Android 4.2.2 / 1024×600。
-- 实车测试组合：比亚迪宋 DM 2017 款 / Freescale MX9A0 / Android 4.2.2 / API 17 / 1024×600 / iPhone 15 Pro Max / iOS 26.2.1。**已实车测试，用户反馈未发现问题；没有在其他车型或车机上测试。**
+- 实车测试组合：比亚迪宋 DM 2018 款 / Freescale MX9A0 / Android 4.2.2 / API 17 / 1024×600 / iPhone 15 Pro Max / iOS 26.2.1。**已实车测试，用户反馈未发现问题；没有在其他车型或车机上测试。**
 - APK：`DiPlay_API17_0.44.49-usb-reattach-focus-beta.apk`
 - SHA-256：`6abd0ed5c1f4f303ed99fd18010f7a0f5d819316ea725fcb70b196b6bb90a3ed`
 

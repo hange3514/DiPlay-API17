@@ -6,7 +6,7 @@
 
 ## 保存范围
 
-车主已确认 0.34 在 2017 款宋 DM / MX9A0 / Android 4.2.2，与 iPhone 15 Pro Max / iOS 26.2.1 的有线方式正常。此结论不扩展到其他设备。
+车主已确认 0.34 在 2018 款宋 DM / MX9A0 / Android 4.2.2，与 iPhone 15 Pro Max / iOS 26.2.1 的有线方式正常。此结论不扩展到其他设备。
 
 - 稳定源码分支：`stable/wired-0.34`，对应提交 `5d3e547`（包含此前验证状态与授权说明修订）。
 - 原始私有 APK SHA-256：`7597a89a17a72fff5132036e1ad8b10dd1155a8940ae761dfcac0a2bf3b0e6bc`。

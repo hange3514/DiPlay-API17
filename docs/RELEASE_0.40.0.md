@@ -20,7 +20,7 @@
 
 唯一的实车组合为：
 
-- 比亚迪宋 DM 2017 款，MX9A0 车机
+- 比亚迪宋 DM 2018 款，MX9A0 车机
 - Android 4.2.2，API 17；Linux 内核 3.0.35-svn54963
 - iPhone 15 Pro Max，iOS 26.2.1
 - USB 有线连接

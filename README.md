@@ -1,11 +1,11 @@
-﻿# DiPlay API 17 兼容性移植
+# DiPlay API 17 兼容性移植
 
 本仓库是基于 [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) 的 Android API 17 有线 CarPlay 移植与兼容性实验分支，遵循 GPL-3.0。公开源码和版本 APK 发布在 GitHub Releases。
 
 ## 当前版本
 
 - 当前正式版：**DiPlay 0.44.49**（APK 内部版本名为 `0.44.49-usb-reattach-focus-beta`），适用于 Android API 17。对应源码在 `legacy/`，APK 与 SHA-256 在 [GitHub Releases](https://github.com/hange3514/DiPlay-API17/releases)。
-- 实车测试组合：比亚迪宋 DM 2017 款、Freescale MX9A0、Android 4.2.2 / API 17、1024×600、iPhone 15 Pro Max / iOS 26.2.1。0.44.49 已在该组合实车测试，用户反馈未发现问题；没有在其他车型或车机上测试。
+- 实车测试组合：比亚迪宋 DM 2018 款、Freescale MX9A0、Android 4.2.2 / API 17、1024×600、iPhone 15 Pro Max / iOS 26.2.1。0.44.49 已在该组合实车测试，用户反馈未发现问题；没有在其他车型或车机上测试。
 - 0.40.0 是此前有明确稳定有线使用记录的版本。历史版本可在 Releases 查看。
 
 ## 0.44.49 更新摘要
