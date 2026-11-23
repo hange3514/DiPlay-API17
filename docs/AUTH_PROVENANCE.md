@@ -17,3 +17,7 @@
 ## 0.44.49 公开 APK
 
 GitHub Release `v0.44.49-usb-reattach-focus-beta` 中的 APK 也包含上述同一组上游来源附件身份材料：`identity.pk8` SHA-256 为 `bd50eda2d8dd95a8464440f1aebca7068dcab46a2461ecaf826c7f98f5621a75`，`certificate.p7b` SHA-256 为 `634a93dd6c4338080524025411752597ecb828591839cd062a8292fd7e9e844e`。它们只作为该版本 APK 的运行资源发布，没有加入源码仓库。该发布不代表 Apple 认证或额外分发授权，也不保证未来 iOS 版本或其他车型上的可用性。
+
+## 0.44.50 公开 APK
+
+正式版 `v0.44.50` 保留上述同一组上游附件身份材料。已核对两个 APK 内置文件的 SHA-256 与此文档相同。

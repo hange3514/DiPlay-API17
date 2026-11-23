@@ -6,22 +6,19 @@
 
 我此前把自己的车辆年款误写为 2017 款。经重新确认，实际测试车辆是 **2018 款比亚迪宋 DM**。此前错误说明可能误导读者，我为此郑重致歉，相关车型信息现已同步更正。
 
-目前仅有该车机（MX9A0 / Android 4.2.2 / API 17）与 iPhone 15 Pro Max（iOS 26.2.1）的有线实车测试记录；其他车型和车机没有测试。
-
 ## 当前版本
 
-- 当前正式版：**DiPlay 0.44.49**（APK 内部版本名为 `0.44.49-usb-reattach-focus-beta`），适用于 Android API 17。对应源码在 `legacy/`，APK 与 SHA-256 在 [GitHub Releases](https://github.com/hange3514/DiPlay-API17/releases)。
-- 实车测试组合：比亚迪宋 DM 2018 款、Freescale MX9A0、Android 4.2.2 / API 17、1024×600、iPhone 15 Pro Max / iOS 26.2.1。0.44.49 已在该组合实车测试，用户反馈未发现问题；没有在其他车型或车机上测试。
-- 0.40.0 是此前有明确稳定有线使用记录的版本。历史版本可在 Releases 查看。
+- 当前有线正式版为 **DiPlay 0.44.50**。实车使用的 APK 内部版本名为 `0.44.50-wheel-media-confirm-beta`，对应源码在 `legacy/`。[下载 APK 和 SHA-256](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.50)
+- 实车验证通过的组合为比亚迪宋 DM 2018 款、Freescale MX9A0、Android 4.2.2 / API 17、1024 × 600、iPhone 15 Pro Max / iOS 26.2.1。
+- 历史版本在 [GitHub Releases](https://github.com/hange3514/DiPlay-API17/releases) 查看。
 
-## 0.44.49 更新摘要
+## 0.44.50 更新摘要
 
-- 沿用应用内用户态 IPv6 网络处理，正常连接不再创建 Android VPN，因而不再出现 VPN 授权弹窗。
-- 保留 0.44.48 的电话麦克风低延迟滤波：抑制低频风噪/轰鸣，并在语音间隙柔和压低底噪；没有更换已验证的音频通路。
-- 保留启动过渡动画、连接进度界面和控制面板的界面优化。
-- 继续使用此前连接预热；本版修复 USB 重枚举后授权对象过期和默认 Activity 抢占 USB 系统弹窗导致的等待问题。本次实车测试未发现连接异常；不同车机和手机的 CarKit/MFi 握手耗时仍可能不同。
+- 修复方向盘上一曲、下一曲间歇失效。投屏显示首帧后申请媒体键接收权，断开后释放。
+- 增加媒体键接收权回读、收键和转发的诊断记录。
+- 延续 0.44.49 的免 VPN 有线连接、麦克风降噪、界面和连接预热。
 
-逐项说明、安装步骤和 SHA-256 见 [`docs/RELEASE_0.44.49.md`](docs/RELEASE_0.44.49.md)。
+安装步骤与文件校验见 [0.44.50 发布说明](docs/RELEASE_0.44.50.md)。
 
 ## 隐私与发布内容
 

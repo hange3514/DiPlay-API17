@@ -2,9 +2,11 @@ package local.headunit.diplay
 
 import android.app.*
 import android.content.*
+import android.content.pm.PackageManager
 import android.hardware.usb.*
 import android.media.AudioManager
 import android.os.*
+import android.provider.Settings
 import android.view.Surface
 import com.shilapi.xcertplay.airplay.*
 import com.shilapi.xcertplay.transport.*
@@ -32,6 +34,9 @@ class WiredService:Service() {
   @JvmStatic fun currentFps():Int=live?.selectedFps?:0
   @JvmStatic fun isVideoReady():Boolean=live?.videoReady==true
   @Volatile private var live:WiredService?=null
+  // Main-thread request state. AudioManager has no registration result.
+  private var mediaButtonRegistrationRequested=false
+  private var mediaButtonRegistrationGeneration=0L
   private val cleanupCount=java.util.concurrent.atomic.AtomicInteger()
   private val connectingWorkers=java.util.concurrent.atomic.AtomicInteger()
   @JvmStatic fun stop(context:Context){live?.shutdown();context.stopService(Intent(context,WiredService::class.java))}
@@ -92,6 +97,7 @@ class WiredService:Service() {
  private val failed=java.util.concurrent.atomic.AtomicBoolean(false)
  private val rawAirPlayFailureCount=java.util.concurrent.atomic.AtomicInteger()
  private val resourceLock=Any()
+ private val mainHandler=Handler(Looper.getMainLooper())
  private val latestPerformance=ConcurrentHashMap<String,String>()
  @Volatile private var usbLinked=false
  @Volatile private var usbPermissionPending=false
@@ -120,10 +126,10 @@ class WiredService:Service() {
  private val listener=object:AirPlaySessionListener {
   override fun onSessionActive(session:AirPlaySession){synchronized(resourceLock){
    if(closed||session.isClosed||!sessions.contains(session))return
-   this@WiredService.session=session;sessionGeneration++;lastFailure=null;wiredStartWatchdog?.sessionActive();if(!videoReady)phase("first_video");note("AIRPLAY_ACTIVE","CarPlay协议会话已建立，等待画面和声音")
+   this@WiredService.session=session;sessionGeneration++;lastFailure=null;wiredStartWatchdog?.sessionActive();refreshMediaButtonOwner();if(!videoReady)phase("first_video");note("AIRPLAY_ACTIVE","CarPlay协议会话已建立，等待画面和声音")
   }}
   override fun onSessionEnded(session:AirPlaySession){synchronized(resourceLock){
-   val wasActive=this@WiredService.session===session;if(wasActive){this@WiredService.session=null;sessionGeneration++};val endedGeneration=sessionGeneration;sessions.remove(session)
+   val wasActive=this@WiredService.session===session;if(wasActive){this@WiredService.session=null;sessionGeneration++;refreshMediaButtonOwner()};val endedGeneration=sessionGeneration;sessions.remove(session)
    val error=session.protocolFailure
    if(error!=null&&!closed&&(wasActive||this@WiredService.session==null)){fail(IOException("protocol failure"),"airplay_session_protocol")}
    else if(!closed&&wasActive){note("AIRPLAY_ENDED","手机会话已结束");runCatching{watchdog.schedule({synchronized(resourceLock){if(!closed&&sessionGeneration==endedGeneration&&this@WiredService.session==null)fail(IOException("session ended"),"airplay_session_ended")}},2,TimeUnit.SECONDS)}}
@@ -156,9 +162,92 @@ class WiredService:Service() {
  private fun safeDiagnosticType(t:Throwable):String { val value=t.javaClass.simpleName.replace(Regex("[^A-Za-z0-9_]"),"").take(48);return value.ifEmpty{"Throwable"} }
  private fun recordFailure(e:Throwable,origin:String){try{var root=e;var count=0;while(root.cause!=null&&root.cause!==root&&count++<8)root=root.cause!!;MainActivity.record(this,"CONNECTION_FAILURE",JSONObject().put("origin",origin).put("phase",activeDiagnosticStage).put("errorType",safeDiagnosticType(e)).put("causeType",safeDiagnosticType(root)).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt).put("videoReady",videoReady).put("usbLinked",usbLinked).put("sessionCount",sessions.size).put("activeSession",session!=null).put("userlandNetworkOpen",userlandNetwork!=null).put("networkBackend","lwip_userland_ncm"))}catch(_:Throwable){}}
  private fun fail(e:Throwable,origin:String="connect_worker"){if(!closed&&failed.compareAndSet(false,true)){recordFailure(e,origin);var cause:Throwable?=e;val chain=ArrayList<String>();while(cause!=null&&chain.size<4){chain.add(cause.javaClass.simpleName+": "+(cause.message?:"connection failed").take(160));cause=cause.cause};note("FAILED",chain.joinToString(" → "));shutdown()}}
- override fun onCreate(){super.onCreate();live=this;audioObserver=OemAudioObserver(this);wheelControl=WheelControl(this,object:WheelControl.Sink {override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&!it.isClosed};override fun send(token:Any,action:Int):Boolean {val current=this@WiredService.session;if(closed||current==null||current!==token||current.isClosed)return false;return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);5->{current.invokeSiri();true};else->false}}});usb=getSystemService(Context.USB_SERVICE) as UsbManager;host=IphoneUsbHost(this,usb,IphoneUsbMatcher.appleVendor(),onDiagnostic={log("USB",it)});handles.add(host.registerPermissionReceiver{result->authorizationDenied=result is IphoneUsbHost.PermissionResult.Denied;val device=when(result){is IphoneUsbHost.PermissionResult.Granted->result.device;is IphoneUsbHost.PermissionResult.Denied->result.device};val requestedAt=authorizationRequestedAt;val requestPhase=authorizationRequestPhase;val requestSequence=authorizationRequestSequence;log("USB_PERMISSION_RESULT","sequence=$requestSequence phase=$requestPhase granted=${!authorizationDenied} device=${device.deviceName} vendor=${device.vendorId} product=${device.productId} elapsedMs=${if(requestedAt>0)SystemClock.elapsedRealtime()-requestedAt else -1}");authorization.countDown()});registerMediaButtonOwner()}
- private fun registerMediaButtonOwner(){try{(getSystemService(Context.AUDIO_SERVICE) as AudioManager).registerMediaButtonEventReceiver(ComponentName(this,MediaButtonWheelReceiver::class.java));log("WHEEL_KEY","media_button_owner_registered")}catch(t:Throwable){log("WHEEL_KEY","media_button_owner_failed="+t.javaClass.simpleName)}}
- private fun unregisterMediaButtonOwner(){try{(getSystemService(Context.AUDIO_SERVICE) as AudioManager).unregisterMediaButtonEventReceiver(ComponentName(this,MediaButtonWheelReceiver::class.java))}catch(_:Throwable){}}
+ override fun onCreate(){super.onCreate();live=this;audioObserver=OemAudioObserver(this);wheelControl=WheelControl(this,object:WheelControl.Sink {override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&!it.isClosed};override fun send(token:Any,action:Int):Boolean {val current=this@WiredService.session;if(closed||current==null||current!==token||current.isClosed)return false;return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);5->{current.invokeSiri();true};else->false}}});usb=getSystemService(Context.USB_SERVICE) as UsbManager;host=IphoneUsbHost(this,usb,IphoneUsbMatcher.appleVendor(),onDiagnostic={log("USB",it)});handles.add(host.registerPermissionReceiver{result->authorizationDenied=result is IphoneUsbHost.PermissionResult.Denied;val device=when(result){is IphoneUsbHost.PermissionResult.Granted->result.device;is IphoneUsbHost.PermissionResult.Denied->result.device};val requestedAt=authorizationRequestedAt;val requestPhase=authorizationRequestPhase;val requestSequence=authorizationRequestSequence;log("USB_PERMISSION_RESULT","sequence=$requestSequence phase=$requestPhase granted=${!authorizationDenied} device=${device.deviceName} vendor=${device.vendorId} product=${device.productId} elapsedMs=${if(requestedAt>0)SystemClock.elapsedRealtime()-requestedAt else -1}");authorization.countDown()})}
+ private fun shouldOwnMediaButtons():Boolean =
+  !closed && !failed.get() && videoReady && session?.isClosed==false
+
+ private fun refreshMediaButtonOwner(){
+  mainHandler.post{
+   // A delayed callback from an older service applies the state of the current service.
+   val current=live
+   val owner=current?.takeIf{it.shouldOwnMediaButtons()}
+   if(mediaButtonRegistrationRequested==(owner!=null))return@post
+   val generation=++mediaButtonRegistrationGeneration
+   val logger=current?:this
+   val receiver=ComponentName(this,MediaButtonWheelReceiver::class.java)
+   if(owner!=null){
+    try{
+     packageManager.getReceiverInfo(receiver,0)
+    }catch(error:PackageManager.NameNotFoundException){
+     logger.recordMediaButtonOwner("receiver_unavailable",error)
+     return@post
+    }catch(error:RuntimeException){
+     logger.recordMediaButtonOwner("receiver_check_failed",error)
+     return@post
+    }
+    try{
+     val initialOwner=owner.readMediaButtonOwnerSetting()
+     val audio=getSystemService(Context.AUDIO_SERVICE) as AudioManager
+     audio.registerMediaButtonEventReceiver(receiver)
+     mediaButtonRegistrationRequested=true
+     logger.recordMediaButtonOwner("register_requested")
+     owner.verifyMediaButtonOwner(receiver,initialOwner,generation)
+    }catch(error:Exception){
+     logger.recordMediaButtonOwner("register_failed",error)
+    }
+   }else{
+    try{
+     val audio=getSystemService(Context.AUDIO_SERVICE) as AudioManager
+     audio.unregisterMediaButtonEventReceiver(receiver)
+     mediaButtonRegistrationRequested=false
+     logger.recordMediaButtonOwner("release_requested")
+    }catch(error:Exception){
+     logger.recordMediaButtonOwner("release_failed",error)
+    }
+   }
+  }
+ }
+
+ private fun readMediaButtonOwnerSetting():Result<String?> =
+  runCatching { Settings.System.getString(contentResolver,"media_button_receiver") }
+
+ private fun verifyMediaButtonOwner(receiver:ComponentName,initialOwner:Result<String?>,generation:Long,remaining:Int=4){
+  if(Build.VERSION.SDK_INT>=21){
+   recordMediaButtonOwner("owner_readback_unsupported")
+   return
+  }
+  // API17 AudioService writes its selected receiver to Settings asynchronously.
+  // Observe one bounded window because another player may claim the same role.
+  val delayMs=if(remaining==4)150L else 350L
+  mainHandler.postDelayed({
+   if(generation!=mediaButtonRegistrationGeneration || live!==this ||
+      !mediaButtonRegistrationRequested || !shouldOwnMediaButtons())return@postDelayed
+   val readback=readMediaButtonOwnerSetting()
+   val observed=readback.getOrNull()?.let(ComponentName::unflattenFromString)
+   if(observed==receiver){
+    val previous=initialOwner.getOrNull()?.let(ComponentName::unflattenFromString)
+    val decision=when {
+     initialOwner.isFailure -> "owner_matches_without_baseline"
+     previous==receiver -> "owner_already_recorded"
+     else -> "owner_readback_confirmed"
+    }
+    recordMediaButtonOwner(decision)
+   }else if(remaining>1){
+    verifyMediaButtonOwner(receiver,initialOwner,generation,remaining-1)
+   }else{
+    val decision=if(readback.getOrNull()==null)"owner_readback_unavailable" else "owner_readback_not_confirmed"
+    recordMediaButtonOwner(decision,readback.exceptionOrNull())
+   }
+  },delayMs)
+ }
+
+ private fun recordMediaButtonOwner(decision:String,error:Throwable?=null){
+  try{
+   val row=JSONObject().put("keyPath","media_button_owner").put("keyDecision",decision)
+   if(error!=null)row.put("errorType",safeDiagnosticType(error))
+   MainActivity.record(this,"WHEEL_KEY",row)
+  }catch(_:Exception){}
+ }
  override fun onStartCommand(i:Intent?,flags:Int,id:Int):Int {
   if(started)return START_NOT_STICKY;usbBatchId=i?.getStringExtra("usb_batch_id").orEmpty().take(80);usbProfile=if(usbBatchId.isEmpty())UsbStartupProfile.DEFAULT else UsbStartupProfile.valid(i?.getIntExtra("usb_startup_profile",0)?:0);requestStartedAt=(i?.getLongExtra("request_started_at",bornAt)?:bornAt).takeIf{it in 1..bornAt}?:bornAt;vpnWaitMs=(i?.getLongExtra("vpn_wait_ms",0)?:0).coerceIn(0,(bornAt-requestStartedAt).coerceAtLeast(0));connectionId=i?.getStringExtra("connection_id").orEmpty();if(cleanupCount.get()>0||connectingWorkers.get()>0||MediaWorkers.busy()){note("FAILED","上一轮连接正在释放，请稍后重试");shutdown();return START_NOT_STICKY};started=true;CrashEvidence.begin(this,connectionId);selectedFps=PlaybackOptions.read(this);log("VIDEO_CONFIG","requestedFps=$selectedFps width=${ProjectionConfig.WIDTH} height=${ProjectionConfig.HEIGHT}");log("CONNECT_BUILD",runCatching{packageManager.getPackageInfo(packageName,0).versionName}.getOrDefault("unknown"));note("CONNECT_START","正在建立CarPlay连接");log("CONNECTION_PREWARM","at=service_start identityReady=${ConnectionPrewarm.identityReady()} nativeReady=${ConnectionPrewarm.nativeReady()} nativeStatus=${ConnectionPrewarm.nativePrewarmStatus()} mfiReady=${VerifiedMfiCache.ready()}")
   watchdog.schedule({if(!closed&&!videoReady&&sink?.receivedVideo!=true)fail(IOException("startup timeout"),"startup_watchdog")},180,TimeUnit.SECONDS)
@@ -349,7 +438,7 @@ class WiredService:Service() {
   val identity=store.identity()
   // API17 has no per-app VPN routing. Only the USB link-local /64 is routed; no default/DNS routes.
   phase("airplay_listener");val configAir=AirPlayConfig("DiPlay API17",macText,macText,"320.20",AirPlayDisplayConfig(ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,fps=selectedFps),microphone=true)
-  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,{log("MEDIA",it);if(!closed&&!videoReady&&it=="video_rendered_frames=1"){videoReady=true;activeDiagnosticStage="video_active";CrashEvidence.updateStage(this@WiredService,connectionId,"video_active",usbLinked,true);startup.firstFrame(SystemClock.elapsedRealtime());reportStartup("first_frame");note("VIDEO_READY","已收到并解码CarPlay画面；按返回键显示控制面板")}});renderer.onVideoFailure={fail(IOException("video decode failure",it),"video_decoder")};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
+  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,{log("MEDIA",it);if(!closed&&!videoReady&&it=="video_rendered_frames=1"){videoReady=true;refreshMediaButtonOwner();activeDiagnosticStage="video_active";CrashEvidence.updateStage(this@WiredService,connectionId,"video_active",usbLinked,true);startup.firstFrame(SystemClock.elapsedRealtime());reportStartup("first_frame");note("VIDEO_READY","已收到并解码CarPlay画面；按返回键显示控制面板")}});renderer.onVideoFailure={fail(IOException("video decode failure",it),"video_decoder")};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
   val media=CarPlayMediaEngine(renderer,true);val pairings=store.pairings()
   val srv=LegacySockets.tcp(InetAddress.getByName("fe80::2"),AIRPLAY_CONTROL_PORT);own(Closeable{srv.close()},"airplay_listener");server=srv;log("NETWORK_LISTENER","service=airplay_control family=ipv6 localPort=${srv.localPort} backend=${if(LegacySockets.isUserlandActive())"lwip" else "android"}")
   Thread({try{while(!closed){val socket=srv.accept();airplayTcpAccepted.set(true);log("AIRPLAY_ACCEPT","control TCP accepted");if(!videoReady){phase("airplay_handshake");note("AIRPLAY_HANDSHAKE","投屏通道已连通，正在建立音视频会话")};try{socket.tcpNoDelay=true;socket.keepAlive=true;if(closed){socket.close();break};if(sessions.size>=4){socket.close();continue};val s=AirPlaySession(socket,configAir,identity,pairings,auth,listener,media);val accepted=synchronized(resourceLock){if(closed)false else{sessions.add(s);s.start();true}};if(!accepted)s.close()}catch(e:Throwable){runCatching{socket.close()};throw e}}}catch(e:Throwable){if(!closed)fail(e,"airplay_accept")}},"legacy-airplay").start()
@@ -441,9 +530,10 @@ class WiredService:Service() {
  private fun shutdown(){
   val owned:List<Closeable>
   synchronized(resourceLock){if(closed)return;closed=true;owned=handles.toList();handles.clear();cleanupCount.incrementAndGet()}
+  refreshMediaButtonOwner()
   wiredStartWatchdog?.terminate();wiredStartWatchdog=null
   note("DISCONNECTED","CarPlay 已断开，正在释放连接");
-  reportStartup(if(videoReady)"released_after_video" else "ended_before_video");unregisterMediaButtonOwner();audioObserver?.close();wheelControl?.close();usbLinked=false;authorization.countDown();watchdog.shutdownNow();work.shutdownNow();input.shutdownNow()
+  reportStartup(if(videoReady)"released_after_video" else "ended_before_video");audioObserver?.close();wheelControl?.close();usbLinked=false;authorization.countDown();watchdog.shutdownNow();work.shutdownNow();input.shutdownNow()
   log("RELEASE_BEGIN","handles=${owned.size} sessions=${sessions.size}")
   val pending=java.util.concurrent.atomic.AtomicBoolean(true)
   Handler(Looper.getMainLooper()).postDelayed({if(pending.get()){log("RELEASE_TIMEOUT","cleanup still running after 12 seconds");for((thread,stack) in Thread.getAllStackTraces())if(thread.name.startsWith("legacy-")||thread.name.startsWith("api17-")||thread.name.startsWith("ncm-"))log("RELEASE_TIMEOUT","thread=${thread.name} state=${thread.state} at=${stack.take(5).joinToString()}")}},12000)

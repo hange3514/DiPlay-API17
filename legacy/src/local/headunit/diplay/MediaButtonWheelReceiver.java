@@ -1,5 +1,9 @@
 package local.headunit.diplay;
-import android.content.*;import android.view.KeyEvent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.view.KeyEvent;
+import org.json.JSONObject;
 /**
  * Manifest-declared media button owner, registered by WiredService only while a CarPlay
  * session runs. On API 17 the most recently registered receiver wins, so this takes the
@@ -7,10 +11,24 @@ import android.content.*;import android.view.KeyEvent;
  * not connected it never registers and their behavior is unchanged.
  */
 public final class MediaButtonWheelReceiver extends BroadcastReceiver {
- public void onReceive(Context context,Intent intent){
-  if(intent==null||!Intent.ACTION_MEDIA_BUTTON.equals(intent.getAction()))return;
-  KeyEvent e=intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
-  if(e==null||e.getAction()!=KeyEvent.ACTION_UP)return;
-  WiredService.sendWheelKey(e.getKeyCode(),"media_button_receiver");
- }
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        if (intent == null || !Intent.ACTION_MEDIA_BUTTON.equals(intent.getAction())) return;
+        KeyEvent event = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+        if (event == null) return;
+        int key = event.getKeyCode();
+        int action = event.getAction();
+        if (WiredService.isVideoReady() && WheelKeyPolicy.androidAction(key) != 0 &&
+                (action == KeyEvent.ACTION_UP ||
+                 (action == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0))) {
+            try {
+                MainActivity.record(context, "WHEEL_KEY", new JSONObject()
+                    .put("keyPath", "media_button_receiver")
+                    .put("keyDecision", "receiver_delivered")
+                    .put("keyCode", key)
+                    .put("keyAction", action));
+            } catch (Exception ignored) { }
+        }
+        if (action == KeyEvent.ACTION_UP) WiredService.sendWheelKey(key, "media_button_receiver");
+    }
 }
