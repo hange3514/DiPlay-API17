@@ -11,9 +11,9 @@
 
 ## 适配交流
 
-**QQ群「就是要」 · `1078069411`**。用 QQ 扫下方二维码，或搜索群号加入。
+**QQ群「就是耍」 · `1078069411`**。用 QQ 扫下方二维码，或搜索群号加入。
 
-<a href="docs/images/qq-group-1078069411.jpg"><img src="docs/images/qq-group-1078069411.jpg" width="230" alt="QQ群「就是要」1078069411 的加群二维码"></a>
+<a href="docs/images/qq-group-1078069411.jpg"><img src="docs/images/qq-group-1078069411.jpg" width="230" alt="QQ群「就是耍」1078069411 的加群二维码"></a>
 
 有线和无线版目前都只在我自己的 **2018 款比亚迪宋 DM** 上做过实车验证。车机为 Freescale MX9A0、Android 4.2.2 / API 17、1024 × 600，手机为 iPhone 15 Pro Max / iOS 26.2.1。无线版的 CM390 代码参考上游项目，尚未实车测试。
 
