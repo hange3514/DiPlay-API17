@@ -7,16 +7,16 @@
 **本项目在应用内处理 CarPlay 所需的通信。有线和无线版都无需建立 Android 系统 VPN，车机重启后也不会再出现 VPN 授权弹窗。**
 
 - **有线插线即连。** 应用内的 lwIP 协议栈直接处理 USB NCM 链路上的 IPv6、TCP 和 UDP，投屏会话走应用内套接字。开启自动连接并完成首次授权后，车机开机即可检测 iPhone，插上数据线就自动进入投屏。
-- **无线上车自动连接。** 应用内的 USB 蓝牙协议栈负责外置适配器的配对，并通过 iAP2 引导 iPhone 加入车机热点。画面、声音和控制直接走 Wi-Fi。首次配对并成功投屏后，保持适配器插着、iPhone 的蓝牙和 Wi-Fi 开启，车机开机就会自动尝试连接，无需每次打开应用或点「连接」。
+- **无线上车自动连接。** 应用内的 USB 蓝牙协议栈负责外置适配器的配对，并通过 iAP2 引导 iPhone 加入车机建立的 Wi-Fi Direct 局域网。画面、声音和控制直接走 Wi-Fi。首次配对并成功投屏后，保持适配器插着、iPhone 的蓝牙和 Wi-Fi 开启，车机开机就会自动尝试连接。
 
-初次使用请按系统提示完成 USB 访问授权和 iPhone 端确认。若车机固件无法自动打开热点，无线版会提示手动开启。
+初次使用请按系统提示完成 USB 访问授权和 iPhone 端确认。无线版在支持 Wi-Fi Direct 的 MX9A0 车机上默认使用该模式。请关闭车机系统热点，车机移动数据可以保持开启。
 
 ## 下载 DiPlay
 
 | 版本 | 下载 | 连接与安装 |
 | --- | --- | --- |
 | **有线 CarPlay 0.44.50** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.50/DiPlay_API17_0.44.50-wheel-media-confirm-beta.apk) | USB 数据线连接 iPhone。[发布说明、安装与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.50) |
-| **无线 CarPlay 0.1.98** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.98/DiPlay_API17_0.1.98-wireless-hotspot-order.apk) | 绿联 CM591（`10D7:B012`）配对，iPhone 加入车机热点。[发布说明、配对与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.98) |
+| **无线 CarPlay 0.1.104** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.104/DiPlay_API17_0.1.104-wifi-direct-default.apk) | 绿联 CM591（`10D7:B012`）配对，iPhone 自动加入车机的 Wi-Fi Direct 局域网。[发布说明、安装与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.104) |
 
 ## 适配交流
 
@@ -53,5 +53,5 @@
 ## 构建
 
 - 有线源码在 `legacy/`，参见 [有线构建说明](docs/BUILD.md)。本次发布的内部版本名为 `0.44.50-wheel-media-confirm-beta`。
-- 无线源码在 [`wireless-v0.1.98` 标签的 `legacy-wireless/`](https://github.com/hange3514/DiPlay-API17/tree/wireless-v0.1.98/legacy-wireless)，参见 [无线构建说明](https://github.com/hange3514/DiPlay-API17/blob/wireless-v0.1.98/legacy-wireless/BUILD.md)。
+- 无线源码在 [`wireless-v0.1.104` 标签的 `legacy-wireless/`](https://github.com/hange3514/DiPlay-API17/tree/wireless-v0.1.104/legacy-wireless)，参见 [无线构建说明](https://github.com/hange3514/DiPlay-API17/blob/wireless-v0.1.104/legacy-wireless/BUILD.md)。
 - API 17 编译所需工具链及 Android SDK 组件需自行准备。自签名 APK 要和车机上已有版本签名一致才能覆盖安装。 [历史版本](https://github.com/hange3514/DiPlay-API17/releases)
