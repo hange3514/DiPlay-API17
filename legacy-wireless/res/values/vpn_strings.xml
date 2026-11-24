@@ -1,0 +1,4 @@
+<resources>
+ <string name="vpn_auto_label">DiPlay VPN 自动确认</string>
+ <string name="vpn_auto_description">仅在 DiPlay 正在请求 VPN 授权时，识别系统 VPN 弹窗，勾选信任并点击确定。不会处理照片弹窗或其他应用的授权。可随时在此关闭。</string>
+</resources>

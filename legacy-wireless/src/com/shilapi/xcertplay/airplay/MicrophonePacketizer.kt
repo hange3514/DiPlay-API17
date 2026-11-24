@@ -1,0 +1,165 @@
+package com.shilapi.xcertplay.airplay
+
+import java.net.InetAddress
+
+/** Everything one captured microphone stream needs to send samples to the phone. */
+data class MicrophoneConfig(
+    val audioType: String,
+    val sampleRate: Int,
+    val channels: Int,
+    val payloadType: Int,
+    val frameMillis: Int,
+    val host: InetAddress,
+    val port: Int,
+    val key: ByteArray,
+    val codec: AudioCodecKind = AudioCodecKind.LPCM,
+    val bitrate: Int? = null,
+    /**
+     * The negotiated CarPlay Opus RTP clock. Capture and encoding remain at 48 kHz.
+     */
+    val opusClockRate: Int = OPUS_CAPTURE_RATE,
+    val localAddress: InetAddress? = null,
+) {
+    val samplesPerPacket: Int
+        get() = if (codec == AudioCodecKind.OPUS) {
+            OPUS_SAMPLES_PER_PACKET
+        } else {
+            maxOf(1, sampleRate * frameMillis / 1000)
+        }
+
+    /** How far each packet moves the RTP timestamp, on the negotiated clock. */
+    val rtpSamplesPerPacket: Int
+        get() = if (codec == AudioCodecKind.OPUS) opusClockRate * OPUS_FRAME_MILLIS / 1000 else samplesPerPacket
+
+    val frameBytes: Int
+        get() = samplesPerPacket * channels * 2
+
+    /** Capture one packet of audio at the hardware rate before downmixing and resampling. */
+    fun captureFramesPerPacket(captureRate: Int): Int =
+        ((samplesPerPacket.toLong() * captureRate + sampleRate - 1) / sampleRate).toInt()
+
+    companion object {
+        private const val OPUS_SAMPLES_PER_PACKET = 960
+        private const val OPUS_CAPTURE_RATE = 48_000
+        private const val OPUS_FRAME_MILLIS = 20
+
+        /** CarPlay counts Opus RTP at the advertised stream rate, independent of PCM sampling. */
+        fun opusClockRate(formatBits: Long): Int = when {
+            formatBits and 0x40000000L != 0L -> 48_000
+            formatBits and 0x20000000L != 0L -> 24_000
+            formatBits and 0x10000000L != 0L -> 16_000
+            else -> OPUS_CAPTURE_RATE
+        }
+
+        /**
+         * PCM frame length when the iPhone does not specify framesPerPacket. Pick the longest
+         * common frame that fits a 1,500-byte IPv6 link MTU after RTP sealing and IP/UDP headers.
+         */
+        fun pcmFrameMillis(sampleRate: Int, channels: Int): Int = PCM_FRAME_MILLIS.firstOrNull { millis ->
+            MicrophonePacketizer.SEAL_OVERHEAD + sampleRate * millis / 1000 * channels * 2 <= MAX_UDP_PAYLOAD
+        } ?: PCM_FRAME_MILLIS.last()
+
+        private val PCM_FRAME_MILLIS = listOf(20, 10, 5)
+        private const val MAX_UDP_PAYLOAD = 1500 - 40 - 8
+    }
+}
+
+/** Mutable RTP/ChaCha counters for one microphone uplink. */
+class MicrophoneCounters(
+    var sequence: Int = 0,
+    var timestamp: Int = 0,
+    var nonce: Long = 0,
+)
+
+/**
+ * Seals one microphone payload in the CarPlay RTP layout.
+ *
+ * The 12-byte RTP header is clear; its timestamp and SSRC are authenticated as AAD. The packet
+ * tail repeats the eight-byte little-endian nonce counter after the 16-byte Poly1305 tag.
+ */
+object MicrophonePacketizer {
+    const val RTP_HEADER_LEN = 12
+    const val TAG_LEN = 16
+    const val NONCE_LEN = 8
+    const val SEAL_OVERHEAD = RTP_HEADER_LEN + TAG_LEN + NONCE_LEN
+
+    fun sealPacket(
+        key: ByteArray,
+        payloadType: Int,
+        counters: MicrophoneCounters,
+        body: ByteArray,
+        samples: Int,
+    ): ByteArray {
+        val header = ByteArray(RTP_HEADER_LEN)
+        header[0] = 0x80.toByte()
+        header[1] = (payloadType and 0x7f).toByte()
+        putU16Be(header, 2, counters.sequence)
+        putU32Be(header, 4, counters.timestamp)
+
+        val nonce = ByteArray(12)
+        putU64Le(nonce, 4, counters.nonce)
+        val sealed = AirPlayCrypto.chachaSeal(
+            key = key,
+            nonce = nonce,
+            plaintext = body,
+            aad = header.copyOfRange(4, RTP_HEADER_LEN),
+        )
+
+        val packet = ByteArray(RTP_HEADER_LEN + sealed.size + NONCE_LEN)
+        header.copyInto(packet, 0)
+        sealed.copyInto(packet, RTP_HEADER_LEN)
+        putU64Le(packet, RTP_HEADER_LEN + sealed.size, counters.nonce)
+
+        counters.sequence = (counters.sequence + 1) and 0xffff
+        counters.timestamp += samples
+        counters.nonce++
+        return packet
+    }
+
+    /** Uplink only: captured Android microphone PCM is little-endian; CarPlay mic wire PCM is big-endian. */
+    fun toCarPlayMicrophoneWirePcm(pcmLittleEndian: ByteArray): ByteArray {
+        val output = pcmLittleEndian.copyOf()
+        var index = 0
+        while (index + 1 < output.size) {
+            val first = output[index]
+            output[index] = output[index + 1]
+            output[index + 1] = first
+            index += 2
+        }
+        return output
+    }
+
+    /** AirPlay LPCM downlink uses the opposite byte order from Android AudioTrack PCM16. */
+    fun toAndroidPcm16(wireBigEndian: ByteArray): ByteArray {
+        require(wireBigEndian.size % 2 == 0) { "PCM16 payload must contain complete samples" }
+        val output = wireBigEndian.copyOf()
+        var index = 0
+        while (index < output.size) {
+            val first = output[index]
+            output[index] = output[index + 1]
+            output[index + 1] = first
+            index += 2
+        }
+        return output
+    }
+
+    private fun putU16Be(target: ByteArray, offset: Int, value: Int) {
+        target[offset] = (value ushr 8).toByte()
+        target[offset + 1] = value.toByte()
+    }
+
+    private fun putU32Be(target: ByteArray, offset: Int, value: Int) {
+        target[offset] = (value ushr 24).toByte()
+        target[offset + 1] = (value ushr 16).toByte()
+        target[offset + 2] = (value ushr 8).toByte()
+        target[offset + 3] = value.toByte()
+    }
+
+    private fun putU64Le(target: ByteArray, offset: Int, value: Long) {
+        var remaining = value
+        for (index in 0 until 8) {
+            target[offset + index] = remaining.toByte()
+            remaining = remaining ushr 8
+        }
+    }
+}

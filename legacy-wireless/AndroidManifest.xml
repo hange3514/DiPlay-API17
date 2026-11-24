@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='utf-8'?>
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="local.headunit.diplay.hybrid" android:versionCode="105" android:versionName="0.1.104-wifi-direct-default">
+ <uses-sdk android:minSdkVersion="17" android:targetSdkVersion="17" />
+ <uses-permission android:name="android.permission.INTERNET" />
+ <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+ <uses-permission android:name="android.permission.BLUETOOTH" />
+ <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+ <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+ <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+ <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+ <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+ <uses-permission android:name="android.permission.RECORD_AUDIO" />
+ <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+ <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+ <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+ <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+ <uses-feature android:name="android.hardware.microphone" android:required="false" />
+ <application android:name="local.headunit.diplay.DiPlayApplication" android:icon="@drawable/ic_carplay" android:label="DiPlay &#26080;&#32447; CarPlay" android:theme="@style/DiPlayTheme" android:allowBackup="false">
+  <activity android:name="local.headunit.diplay.MainActivity" android:launchMode="singleTask" android:exported="true" android:screenOrientation="landscape" android:configChanges="orientation|screenSize|keyboardHidden">
+   <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+  </activity>
+  <activity android:name="local.headunit.diplay.UsbBluetoothAttachActivity" android:exported="true" android:permission="android.permission.MANAGE_USB" android:excludeFromRecents="true" android:taskAffinity="" android:theme="@android:style/Theme.NoDisplay">
+   <intent-filter><action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" /></intent-filter>
+   <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" android:resource="@xml/usb_bluetooth" />
+  </activity>
+  <receiver android:name="local.headunit.diplay.BootAutoStartReceiver" android:enabled="true" android:exported="false">
+   <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+  </receiver>
+  <receiver android:name="local.headunit.diplay.MediaButtonWheelReceiver" android:exported="false">
+   <intent-filter><action android:name="android.intent.action.MEDIA_BUTTON" /></intent-filter>
+  </receiver>
+  <service android:name="local.headunit.diplay.WiredService" android:exported="false" />
+ </application>
+</manifest>

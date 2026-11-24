@@ -1,0 +1,75 @@
+#ifndef DIPLAY_API17_SYS_TYPES_H
+#define DIPLAY_API17_SYS_TYPES_H
+
+/*
+ * The Zig cross sysroot models musl's pthread structs. This APK links against
+ * Android API 17's Bionic pthread implementation, so expose the ordinary
+ * POSIX scalar types here and let native/userland/pthread.h provide the
+ * Bionic-compatible opaque pthread storage used by this build.
+ */
+#include <features.h>
+#include <stdint.h>
+
+#define __NEED_ino_t
+#define __NEED_dev_t
+#define __NEED_uid_t
+#define __NEED_gid_t
+#define __NEED_mode_t
+#define __NEED_nlink_t
+#define __NEED_off_t
+#define __NEED_pid_t
+#define __NEED_size_t
+#define __NEED_ssize_t
+#define __NEED_timer_t
+#define __NEED_clockid_t
+#define __NEED_blkcnt_t
+#define __NEED_fsblkcnt_t
+#define __NEED_fsfilcnt_t
+#define __NEED_id_t
+#define __NEED_key_t
+#define __NEED_clock_t
+#define __NEED_blksize_t
+#define __NEED_useconds_t
+
+#if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+#define __NEED_int8_t
+#define __NEED_int16_t
+#define __NEED_int32_t
+#define __NEED_int64_t
+#define __NEED_u_int64_t
+#define __NEED_register_t
+#endif
+
+#include <bits/alltypes.h>
+
+/* Android API 17 uses the 32-bit time ABI on this 32-bit ARM target. */
+typedef int32_t time_t;
+#define __DEFINED_time_t
+typedef int32_t suseconds_t;
+#define __DEFINED_suseconds_t
+
+#if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+typedef unsigned char u_int8_t;
+typedef unsigned short u_int16_t;
+typedef unsigned u_int32_t;
+typedef char *caddr_t;
+typedef unsigned char u_char;
+typedef unsigned short u_short, ushort;
+typedef unsigned u_int, uint;
+typedef unsigned long u_long, ulong;
+typedef long long quad_t;
+typedef unsigned long long u_quad_t;
+#include <endian.h>
+#include <sys/time.h>
+#include <sys/select.h>
+#endif
+
+#if defined(_LARGEFILE64_SOURCE)
+#define blkcnt64_t blkcnt_t
+#define fsblkcnt64_t fsblkcnt_t
+#define fsfilcnt64_t fsfilcnt_t
+#define ino64_t ino_t
+#define off64_t off_t
+#endif
+
+#endif
