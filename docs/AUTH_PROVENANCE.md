@@ -21,3 +21,7 @@ GitHub Release `v0.44.49-usb-reattach-focus-beta` 中的 APK 也包含上述同�
 ## 0.44.50 公开 APK
 
 正式版 `v0.44.50` 保留上述同一组上游附件身份材料。已核对两个 APK 内置文件的 SHA-256 与此文档相同。
+
+## 无线版 `wireless-v0.1.98`
+
+无线 APK 与维护者在车机上使用的在线更新包逐字节一致。该 APK 内的两个附件身份文件与上述 `v0.44.50` 的记录相同，均出自同一上游预览包。无线源码公开目录不含这些文件或 APK 签名凭据。上游说明这组实验材料未随项目许可证重新授权，未来 iOS 的接受情况仍未确定。 [上游第三方声明](https://github.com/shihabal3amri/DiPlay/blob/main/docs/THIRD_PARTY_NOTICES.md#experimental-authentication-data)

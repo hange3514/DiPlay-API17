@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient android:angle="135" android:startColor="#102238" android:centerColor="#081321" android:endColor="#040811" />
+        </shape>
+    </item>
+    <item android:drawable="@drawable/window_logo" />
+</layer-list>

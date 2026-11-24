@@ -1,0 +1,10 @@
+{
+  "monocypher.c": {
+    "source": "https://raw.githubusercontent.com/LoupVaillant/Monocypher/4.0.2/src/monocypher.c",
+    "sha256": "02174117935699d418443c75a558a287deb06ef8cf7c1adced61d9047d2f323d"
+  },
+  "monocypher.h": {
+    "source": "https://raw.githubusercontent.com/LoupVaillant/Monocypher/4.0.2/src/monocypher.h",
+    "sha256": "fcaf6ed771358bb4f40fba016f6518ae86ec02b1b877d2cc35ad92d3a26fd7b3"
+  }
+}

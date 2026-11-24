@@ -1,0 +1,6 @@
+/build/
+/dist/
+/assets/offline-mfi/
+__pycache__/
+*.jks
+*.keystore
