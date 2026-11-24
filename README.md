@@ -1,6 +1,6 @@
 # DiPlay API 17 兼容性移植
 
-本仓库是基于 [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) 的 Android API 17 有线 CarPlay 移植与兼容性实验分支，遵循 GPL-3.0。公开源码和版本 APK 发布在 GitHub Releases。
+本仓库是基于 [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) 的 Android API 17 有线和无线 CarPlay 移植，项目代码遵循 GPL-3.0。公开源码和版本 APK 发布在 GitHub Releases。
 
 ## 更正与致歉
 
@@ -9,6 +9,7 @@
 ## 当前版本
 
 - 当前有线正式版为 **DiPlay 0.44.50**。实车使用的 APK 内部版本名为 `0.44.50-wheel-media-confirm-beta`，对应源码在 `legacy/`。[下载 APK 和 SHA-256](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.50)
+- 无线首次公开版为 **DiPlay 0.1.98**，实车使用绿联 CM591（`10D7:B012`）和车机热点。CM390 路径参考上游源码，尚未实车验证。[无线 APK、安装说明和源码](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.98)
 - 实车验证通过的组合为比亚迪宋 DM 2018 款、Freescale MX9A0、Android 4.2.2 / API 17、1024 × 600、iPhone 15 Pro Max / iOS 26.2.1。
 - 历史版本在 [GitHub Releases](https://github.com/hange3514/DiPlay-API17/releases) 查看。
 
