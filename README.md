@@ -2,6 +2,15 @@
 
 本仓库是基于 [shihabal3amri/DiPlay](https://github.com/shihabal3amri/DiPlay) 的 Android API 17 有线和无线 CarPlay 移植，项目代码遵循 GPL-3.0。公开源码和版本 APK 发布在 GitHub Releases。
 
+## 开机自动连接，无需 VPN 授权
+
+**本项目在应用内处理 CarPlay 所需的通信。有线和无线版都无需建立 Android 系统 VPN，车机重启后也不会再出现 VPN 授权弹窗。**
+
+- **有线插线即连。** 应用内的 lwIP 协议栈直接处理 USB NCM 链路上的 IPv6、TCP 和 UDP，投屏会话走应用内套接字。开启自动连接并完成首次授权后，车机开机即可检测 iPhone，插上数据线就自动进入投屏。
+- **无线上车自动连接。** 应用内的 USB 蓝牙协议栈负责外置适配器的配对，并通过 iAP2 引导 iPhone 加入车机热点。画面、声音和控制直接走 Wi-Fi。首次配对并成功投屏后，保持适配器插着、iPhone 的蓝牙和 Wi-Fi 开启，车机开机就会自动尝试连接，无需每次打开应用或点「连接」。
+
+初次使用请按系统提示完成 USB 访问授权和 iPhone 端确认。若车机固件无法自动打开热点，无线版会提示手动开启。
+
 ## 下载 DiPlay
 
 | 版本 | 下载 | 连接与安装 |
