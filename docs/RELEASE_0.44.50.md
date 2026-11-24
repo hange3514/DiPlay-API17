@@ -25,6 +25,10 @@
 | 投屏分辨率 | 1024 × 600 |
 | 手机 | iPhone 15 Pro Max，iOS 26.2.1 |
 
+下图为本次实测的 **2018 款比亚迪宋 DM**。
+
+<img src="images/tested-byd-song-dm-2018.png" width="520" alt="有线 CarPlay 实测车辆，白色 2018 款比亚迪宋 DM">
+
 ## 安装与校验
 
 下载发布附件中的 APK，在车机安装后用 USB 数据线连接 iPhone。若系统弹出 DiPlay 的 USB 访问授权，请允许。

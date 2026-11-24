@@ -24,9 +24,13 @@
 
 <a href="docs/images/qq-group-1078069411.jpg"><img src="docs/images/qq-group-1078069411.jpg" width="230" alt="QQ群「就是耍」1078069411 的加群二维码"></a>
 
-有线和无线版目前都只在我自己的 **2018 款比亚迪宋 DM** 上做过实车验证。车机为 Freescale MX9A0、Android 4.2.2 / API 17、1024 × 600，手机为 iPhone 15 Pro Max / iOS 26.2.1。无线版的 CM390 代码参考上游项目，尚未实车测试。
-
 欢迎其他车型用户在群里分享使用结果。反馈问题时可附上车型和年款、车机型号和 Android 版本、iPhone 和 iOS 版本、DiPlay 版本、连接方式及复现步骤。无线连接可以注明 USB 蓝牙适配器型号。我有时间会根据各车型的反馈排查和优化。
+
+## 实测车型
+
+有线和无线版目前都只在下图这台 **2018 款比亚迪宋 DM** 上实测。车机为 Freescale MX9A0、Android 4.2.2 / API 17、1024 × 600，手机为 iPhone 15 Pro Max / iOS 26.2.1。无线版实测使用绿联 CM591，CM390 代码参考上游项目，尚未实车测试。
+
+<img src="docs/images/tested-byd-song-dm-2018.png" width="520" alt="有线和无线 CarPlay 实测车辆，白色 2018 款比亚迪宋 DM">
 
 ## 更正与致歉
 
