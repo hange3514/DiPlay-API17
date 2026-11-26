@@ -17,8 +17,10 @@
 
 | 版本 | 下载 | 连接与安装 |
 | --- | --- | --- |
-| **有线 CarPlay 0.44.51** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.51/DiPlay_API17_0.44.51.apk) | USB 数据线连接 iPhone，支持最高 60 FPS 配置与双指触控转发。[发布说明、安装与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.51) |
-| **无线 CarPlay 0.1.104** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.104/DiPlay_API17_0.1.104-wifi-direct-default.apk) | 绿联 CM591（`10D7:B012`）配对，iPhone 自动加入车机的 Wi-Fi Direct 局域网。[发布说明、安装与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.104) |
+| **有线 CarPlay 0.44.52** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.52/DiPlay_API17_0.44.52.apk) | USB 数据线连接 iPhone，支持最高 60 FPS 配置与双指触控转发。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.52) |
+| **无线 CarPlay 0.1.117** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.117/DiPlay_API17_0.1.117-auto-evidence.apk) | 实车使用绿联 CM591（`10D7:B012`），iPhone 自动加入车机的 Wi-Fi Direct 局域网。默认 20 FPS，可调至 60 FPS。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.117) |
+
+**反馈只填问题。** 两版都会自动把可读取的原厂车型代码、固件版本、ALSA 声卡与采集路径、通话诊断和方向盘事件放进同一份报告。停车复现问题后，在车机里写一句现象并提交即可。 [反馈与隐私](docs/COMPATIBILITY_TESTING.md)
 
 ## 适配交流
 
@@ -26,7 +28,7 @@
 
 <a href="docs/images/qq-group-1078069411.jpg"><img src="docs/images/qq-group-1078069411.jpg" width="230" alt="QQ群「就是耍」1078069411 的加群二维码"></a>
 
-欢迎其他车型用户在群里分享使用结果。反馈问题时可附上车型和年款、车机型号和 Android 版本、iPhone 和 iOS 版本、DiPlay 版本、连接方式及复现步骤。无线连接可以注明 USB 蓝牙适配器型号。我有时间会根据各车型的反馈排查和优化。
+欢迎其他车型用户在群里交流。遇到通话无声或方向盘按键异常，可在车机复现后提交问题描述。我有时间会根据收到的诊断排查适配。
 
 ## 实测车型
 
@@ -58,7 +60,7 @@
 - 车机采集两个触点的坐标与按下、移动、抬起状态，经 CarPlay 的 HID 通道送给 iPhone，高德地图等支持多点手势的应用就能双指捏合缩放。
 - 分别跟踪两根手指，抬起其中一根时保留另一根。快速滑动时合并积压的移动事件，优先送出按下和抬起。退出投屏、切到其他界面或车机画面重建时会清理旧触点，减少误触和手指松开后地图继续移动的情况。
 
-**验证进度。** 60 FPS 动画和高德地图双指缩放已在这台车的无线 **0.1.109** 上实测通过。公开下载的无线包版本见上方表格。有线 **0.44.51** 通过 API 17 构建和签名校验、493 项 JVM 测试及 3 个原生测试程序，该版的 60 FPS 和双指缩放待有线实车验证。 [安装步骤和 APK 校验](docs/RELEASE_0.44.51.md)
+**验证进度。** 60 FPS 动画和高德地图双指缩放已在这台车的无线 **0.1.109** 上实测通过。两种连接方式当前的下载版本和验证范围见各自的发布说明。 [有线 0.44.52](docs/RELEASE_0.44.52.md) · [无线 0.1.117](docs/WIRELESS_0.1.117.md)
 
 ## 这个移植做了哪些工作
 
@@ -78,12 +80,12 @@
 
 ## 隐私与发布内容
 
-使用在线反馈功能主动提交时，兼容性报告会上传到维护者的私人服务器。报告可能包含车机型号及 Android 版本、用户描述、USB 接口特征、按键码、连接阶段日志和用户手动确认的测试结果。在线功能取决于版本的服务配置。介意上传到私人服务器的用户请勿提交报告。 [兼容性报告说明](docs/COMPATIBILITY_TESTING.md)
+通过应用主动提交的反馈会发送至维护者的私人服务器。两版都自动附带可读取的车机身份、声卡、通话和按键证据。无线版可选择附带短时麦克风测试录音。 [兼容性报告说明](docs/COMPATIBILITY_TESTING.md)
 
 公开源码不包含私人服务器令牌、签名密钥或离线 MFi 身份文件。公开 APK 按维护者决定包含运行所需的上游来源附件身份；来源说明见 [`docs/AUTH_PROVENANCE.md`](docs/AUTH_PROVENANCE.md)。这不代表 Apple 认证或额外分发授权，也不保证未来 iOS 版本或其他车型可用。
 
 ## 构建
 
-- 有线源码在 `legacy/`，参见 [有线构建说明](docs/BUILD.md)。
-- 无线源码在 [`wireless-v0.1.104` 标签的 `legacy-wireless/`](https://github.com/hange3514/DiPlay-API17/tree/wireless-v0.1.104/legacy-wireless)，参见 [无线构建说明](https://github.com/hange3514/DiPlay-API17/blob/wireless-v0.1.104/legacy-wireless/BUILD.md)。
+- 有线源码在 [`v0.44.52` 标签的 `legacy/`](https://github.com/hange3514/DiPlay-API17/tree/v0.44.52/legacy)，参见[有线构建说明](docs/BUILD.md)。
+- 无线源码在 [`wireless-v0.1.117` 标签的 `legacy-wireless/`](https://github.com/hange3514/DiPlay-API17/tree/wireless-v0.1.117/legacy-wireless)，参见[无线构建说明](https://github.com/hange3514/DiPlay-API17/blob/wireless-v0.1.117/legacy-wireless/BUILD.md)。
 - API 17 编译所需工具链及 Android SDK 组件需自行准备。自签名 APK 要和车机上已有版本签名一致才能覆盖安装。 [历史版本](https://github.com/hange3514/DiPlay-API17/releases)
