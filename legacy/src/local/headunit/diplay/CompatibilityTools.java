@@ -439,6 +439,23 @@ final class CompatibilityTools {
         }});
     }
 
+    private static final Pattern DIAGNOSTIC_TOKEN = Pattern.compile("([A-Za-z][A-Za-z0-9_]*)=([^\\s;]+)");
+    private static final Pattern MUSIC_SUMMARY_NUMBER = Pattern.compile("-?[0-9]{1,16}");
+    private static final String VIDEO_RX_WINDOW = "video_rx_window";
+    private static final String VIDEO_RENDER_WINDOW = "video_render_window";
+    private static final int MAX_VIDEO_WINDOWS_PER_STAGE = 18;
+    private static final Set<String> VIDEO_RECEIVE_FIELDS = set(
+        "streamType", "requestedFps", "windowMs", "packets", "bytes", "receivedFrames", "receivedFpsMilli",
+        "senderGapSamples", "senderGapMaxMs", "arrivalGapMaxMs", "deliveryJitterMaxMs",
+        "readMaxMs", "headerReadMaxMs", "bodyReadMaxMs", "readsOver250Ms", "processMaxUs",
+        "decryptAvgUs", "decryptMaxUs");
+    private static final Set<String> VIDEO_RENDER_FIELDS = set(
+        "streamType", "requestedFps", "windowMs", "submittedFrames", "submittedFpsMilli", "skippedFrames",
+        "queueDepth", "queuePeak", "droppedFrames", "queueMaxMs", "decodeMaxMs", "surfaceGapMaxMs",
+        "releaseMaxUs", "dequeueOverrunMaxUs", "inputMaxUs", "inFlightPeak", "receiveToSurfaceMaxMs",
+        "paceHeldFrames", "paceHoldMaxMs", "pressureSkips", "earlyInputReleases", "inputReadyAfterEarlyRelease");
+    private static final Pattern VIDEO_METRIC_NUMBER = Pattern.compile("[0-9]{1,10}");
+
     private static FilteredEvents filterEvents(JSONArray source) throws Exception {
         FilteredEvents result = new FilteredEvents();
         ArrayList<EventCandidate> selected = new ArrayList<EventCandidate>();
@@ -446,6 +463,7 @@ final class CompatibilityTools {
         for (int i = 0; i < source.length(); i++) first = Math.min(first, source.getJSONObject(i).optLong("time", 0));
         if (first == Long.MAX_VALUE) first = 0;
         int alsaCount = 0, priorityCount = 0, transportCount = 0, networkCount = 0, networkMilestoneCount = 0;
+        int receivedWindows = 0, renderedWindows = 0;
         HashSet<String> selectedIds = new HashSet<String>();
         // Keep the newest evidence so old unsubmitted logs cannot crowd out this test run.
         // Reserve ALSA, then direct key/USB/call evidence, then transport details before routine logs.
@@ -465,7 +483,10 @@ final class CompatibilityTools {
                 boolean network = CompatibilityReportPolicy.isNetworkStackEvent(type);
                 boolean networkMilestone = network && CompatibilityReportPolicy.isNetworkStackMilestone(type, detailText);
                 boolean airplayFailure = "AIRPLAY_FAILURE_RAW".equals(type);
-                if (pass == 0 && !((alsa && alsaCount < 40) || (networkMilestone && networkMilestoneCount < 32) || airplayFailure) ||
+                String videoEvent = videoWindowEvent(type, detailText);
+                if (videoEvent != null && (pass != 0 ||
+                    (VIDEO_RX_WINDOW.equals(videoEvent) ? receivedWindows : renderedWindows) >= MAX_VIDEO_WINDOWS_PER_STAGE)) continue;
+                if (pass == 0 && videoEvent == null && !((alsa && alsaCount < 40) || (networkMilestone && networkMilestoneCount < 32) || airplayFailure) ||
                     pass == 1 && (alsa || !priority || transport || priorityCount >= 100) ||
                     pass == 2 && (alsa || !transport || transportCount >= 60 || (network && networkCount >= 36)) ||
                     pass == 3 && (alsa || priority)) continue;
@@ -494,6 +515,11 @@ final class CompatibilityTools {
                     String summary = diagnosticSummary(type, detailText);
                     if (!code.isEmpty()) safe.put("diagnosticCode", code);
                     if (!summary.isEmpty()) safe.put("diagnosticSummary", summary);
+                    if (videoEvent != null) {
+                        appendVideoWindow(safe, videoEvent, detailText);
+                        if (VIDEO_RX_WINDOW.equals(videoEvent)) receivedWindows++;
+                        else renderedWindows++;
+                    }
                     if (network) {
                         String networkDetail = CompatibilityReportPolicy.safeNetworkDetail(detailText);
                         if (!networkDetail.isEmpty()) safe.put("networkDetail", networkDetail);
@@ -515,7 +541,7 @@ final class CompatibilityTools {
         });
         ArrayList<EventCandidate> bounded = new ArrayList<EventCandidate>();
         HashSet<String> boundedIds = new HashSet<String>();
-        int remainingBytes = 42000, networkBudgetBytes = 22000;
+        int remainingBytes = 42000, networkBudgetBytes = 22000, videoBudgetBytes = 10000;
         // Preserve the one bounded raw AirPlay failure before routine transport counters.
         for (EventCandidate item : selected) if ("AIRPLAY_FAILURE_RAW".equals(item.event.optString("type"))) {
             int size = item.event.toString().getBytes("UTF-8").length + 8;
@@ -525,6 +551,18 @@ final class CompatibilityTools {
         for (EventCandidate item : selected) if (item.networkMilestone) {
             int size = item.event.toString().getBytes("UTF-8").length + 8;
             if (size <= remainingBytes) { bounded.add(item); boundedIds.add(item.id); remainingBytes -= size; }
+        }
+        // Retain recent video timings after the critical stack anchors, alongside other report evidence.
+        for (int i = selected.size() - 1; i >= 0; i--) {
+            EventCandidate item = selected.get(i);
+            JSONObject data = item.event.optJSONObject("data");
+            String event = data == null ? "" : data.optString("eventType");
+            String type = item.event.optString("type");
+            boolean calibration = "VIDEO_CALIBRATION_SAMPLE".equals(type) || "VIDEO_CALIBRATION_RESULT".equals(type);
+            if (!calibration && !VIDEO_RX_WINDOW.equals(event) && !VIDEO_RENDER_WINDOW.equals(event)) continue;
+            int size = item.event.toString().getBytes("UTF-8").length + 8;
+            if (size > remainingBytes || size > videoBudgetBytes) continue;
+            bounded.add(item); boundedIds.add(item.id); remainingBytes -= size; videoBudgetBytes -= size;
         }
         for (int i = selected.size() - 1; i >= 0; i--) {
             EventCandidate item = selected.get(i); if (!item.network || item.networkMilestone) continue;
@@ -545,12 +583,53 @@ final class CompatibilityTools {
         return result;
     }
 
+    private static String videoWindowEvent(String type, String detail) {
+        if ("AIRPLAY".equals(type) && detail.startsWith("Receive: video eventType=" + VIDEO_RX_WINDOW + " ")) {
+            return VIDEO_RX_WINDOW;
+        }
+        if ("MEDIA".equals(type) && detail.startsWith("video_progress eventType=" + VIDEO_RENDER_WINDOW + " ")) {
+            return VIDEO_RENDER_WINDOW;
+        }
+        return null;
+    }
+
+    private static void appendVideoWindow(JSONObject out, String event, String detail) throws Exception {
+        out.put("eventType", event);
+        boolean receive = VIDEO_RX_WINDOW.equals(event);
+        Set<String> fields = receive ? VIDEO_RECEIVE_FIELDS : VIDEO_RENDER_FIELDS;
+        java.util.regex.Matcher matcher = DIAGNOSTIC_TOKEN.matcher(detail);
+        while (matcher.find()) {
+            String key = matcher.group(1);
+            String value = matcher.group(2);
+            if (receive && "ended".equals(key) && ("true".equals(value) || "false".equals(value))) {
+                out.put(key, Boolean.parseBoolean(value));
+            } else if (fields.contains(key) && VIDEO_METRIC_NUMBER.matcher(value).matches()) {
+                long count = Long.parseLong(value);
+                if (count >= 0 && count <= 1000000000L) out.put(key, count);
+            }
+        }
+        long windowMs = out.optLong("windowMs");
+        if (!receive && windowMs > 0 && out.has("submittedFrames") && !out.has("submittedFpsMilli")) {
+            long fpsMilli = out.optLong("submittedFrames") * 1000000L / windowMs;
+            if (fpsMilli <= 1000000000L) out.put("submittedFpsMilli", fpsMilli);
+        }
+        // Older servers drop newly introduced structured keys. Preserve the same bounded,
+        // allowlisted measurements in the existing compatible summary column.
+        StringBuilder summary = new StringBuilder("eventType=").append(event);
+        for (String key : fields) {
+            if (out.has(key)) summary.append(' ').append(key).append('=').append(out.getLong(key));
+        }
+        if (out.has("ended")) summary.append(" ended=").append(out.getBoolean("ended"));
+        out.put("diagnosticSummary", summary.toString());
+    }
+
     private static boolean isAlsaDiagnostic(String text) {
         return text.startsWith("microphone_alsa_") || text.startsWith("microphone_duplex_evidence ") || text.startsWith("microphone_capture_path=") || text.startsWith("microphone_capture_fallback ");
     }
 
     private static boolean isHighValueDiagnostic(String type) {
-        return "WHEEL_KEY".equals(type) || "WHEEL_CONTROL".equals(type) || "USB_DEVICE".equals(type) ||
+        return "VIDEO_CALIBRATION_SAMPLE".equals(type) || "VIDEO_CALIBRATION_RESULT".equals(type) ||
+            "WHEEL_KEY".equals(type) || "WHEEL_CONTROL".equals(type) || "USB_DEVICE".equals(type) ||
             "APP_STARTUP".equals(type) || "USB_DEFAULT_HANDLER".equals(type) ||
             "USB_PERMISSION_REQUEST".equals(type) || "USB_PERMISSION_RESULT".equals(type) || "USB_PERMISSION_WAIT".equals(type) ||
             "USBMUX_WRITE_TIMING".equals(type) || "NCM_WRITE_TIMING".equals(type) ||

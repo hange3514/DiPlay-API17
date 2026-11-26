@@ -13,12 +13,42 @@ import java.util.concurrent.atomic.AtomicBoolean
 private data class LegacyAlsaOpened(val candidate:AlsaCapturePathSelector.Candidate,val handle:Long,val rate:Int,val channels:Int)
 
 /** Bounded API17 media workers. No modern AudioAttributes or codec buffer APIs. */
-class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,private val log:(String)->Unit):MediaSink,Closeable {
+class LegacyMedia @JvmOverloads constructor(surface:Surface?,private val width:Int,private val height:Int,private val preferredAvcDecoder:String?=null,private val log:(String)->Unit):MediaSink,Closeable {
  private val siriCapture=SiriCapturePolicy()
  fun speechMode(params:Map<String,Any?>){if(siriCapture.update(params))log("microphone_speech_mode=${siriCapture.mode}")}
- private class VideoTarget(val surface:Surface?)
+ private class VideoTarget(val surface:Surface?,config:ByteArray?=null){
+  val input=VideoInput().apply{config?.let{configure(it)}}
+ }
+ private val videoTargetLock=java.lang.Object()
+ private var latestVideoConfig:ByteArray?=null
+ private var firstVideoKeyframe=false
  @Volatile private var videoTarget=VideoTarget(surface)
- @Synchronized fun setSurface(surface:Surface?){if(closed.get())return;if(videoTarget.surface===surface)return;videoTarget=VideoTarget(surface);videoInput.dropped()}
+ @Volatile private var calibration:VideoCalibrationCapture?=null
+ @Volatile var videoDecoderName="unknown";private set
+ fun beginVideoCalibration(fps:Int):Boolean=synchronized(videoTargetLock){
+  if(closed.get()||videoFailed.get()||videoTarget.surface?.isValid!=true||renderedVideoFrames==0L||calibration!=null)return@synchronized false
+  calibration=VideoCalibrationCapture(fps,System.nanoTime(),videoTarget.input.droppedCount())
+  true
+ }
+ fun finishVideoCalibration():Pair<VideoCalibration.Sample,Long>?=synchronized(videoTargetLock){
+  val sample=calibration?:return@synchronized null
+  calibration=null
+  if(closed.get()||videoFailed.get()||videoTarget.surface?.isValid!=true)return@synchronized null
+  sample.sample(System.nanoTime(),videoTarget.input.droppedCount()) to sample.deliveryJitterMaxMs()
+ }
+ fun cancelVideoCalibration(){synchronized(videoTargetLock){calibration=null}}
+ fun setSurface(surface:Surface?){
+  synchronized(videoTargetLock){
+   if(closed.get())return
+   if(videoTarget.surface!==surface){
+    // Each Surface owns its queue so the decoder cannot flush a new Surface's first IDR.
+    calibration=null
+    videoTarget.input.retire()
+    videoTarget=VideoTarget(surface,latestVideoConfig)
+   }
+   videoTargetLock.notifyAll()
+  }
+ }
  @Volatile var renderedVideoFrames=0L;private set
  @Volatile var receivedVideo=false;private set
  @Volatile var routing:AudioRouting?=null
@@ -27,8 +57,8 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
  fun setOutputVolume(value:Float){for(a in audio.values)a.volume(value)}
  @Volatile var onVideoFailure:((Throwable)->Unit)?=null
  private val closed=AtomicBoolean(false)
- private val videoInput=VideoInput()
  private val videoFailed=AtomicBoolean(false)
+ private val videoRecoveryLock=Any()
  private var lastRecoveryNs=0L
  private val recoveryWork=ThreadPoolExecutor(1,1,0,TimeUnit.MILLISECONDS,ArrayBlockingQueue<Runnable>(1))
  @Volatile private var diagnostic:((String)->Unit)?=null
@@ -37,58 +67,383 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
  private val microphones=ConcurrentHashMap<AudioStreamId,Microphone>()
  private val videoThread=MediaWorkers.start("api17-video"){videoLoop()}
  override fun setVideoDiagnosticHandler(type:Int,handler:(String)->Unit){diagnostic=handler}
- override fun setVideoRecoveryHandler(type:Int,handler:()->Unit){recovery=handler}
- override fun onVideoConfig(type:Int,codecData:ByteArray){if(!closed.get()&&!videoFailed.get()&&videoInput.configure(codecData))log("video_configuration_changed bytes=${codecData.size}")}
- override fun onVideoFrame(type:Int,naluBytes:ByteArray){if(naluBytes.isNotEmpty())receivedVideo=true;if(closed.get()||videoFailed.get()||videoTarget.surface?.isValid!=true)return;if(!videoInput.offer(naluBytes))requestRecovery("queue_overflow")}
- override fun onOwnedVideoFrame(type:Int,naluBytes:ByteArray,senderNanos:Long,arrivalNanos:Long){if(naluBytes.isNotEmpty())receivedVideo=true;if(closed.get()||videoFailed.get()||videoTarget.surface?.isValid!=true)return;if(!videoInput.offerOwned(naluBytes))requestRecovery("queue_overflow")}
- @Synchronized private fun requestRecovery(reason:String){val now=System.nanoTime();if(now-lastRecoveryNs<TimeUnit.SECONDS.toNanos(2))return;lastRecoveryNs=now;log("video_recovery reason=$reason");try{recoveryWork.execute{if(!closed.get())runCatching{recovery?.invoke()}}}catch(_:RejectedExecutionException){}}
- private fun videoLoop(){var codec:MediaCodec?=null;var configured:ByteArray?=null;var frames=0;var stage="waiting_config";var target=videoTarget;var surfaceFrames=0
-  var pending:VideoInput.Frame?=null;var buffers:Array<ByteBuffer>?=null
-  val info=MediaCodec.BufferInfo();var inFlight=0;var skipped=0;var queueMaxMs=0L;var decodeMaxMs=0L;var lastStats=System.nanoTime()
-  var releaseMaxUs=0L;var dequeueOverrunMaxUs=0L;var inputMaxUs=0L;var inFlightPeak=0
-  fun dispose(){runCatching{codec?.stop()};runCatching{codec?.release()};codec=null;configured=null;buffers=null;pending=null;inFlight=0}
-  fun drain(waitUs:Long=0){val c=codec?:return;stage="drain";var latest=-1;var latestPts=0L
-   fun release(index:Int,render:Boolean){val at=System.nanoTime();c.releaseOutputBuffer(index,render);releaseMaxUs=maxOf(releaseMaxUs,(System.nanoTime()-at)/1000)}
-   // Feed every reference frame to the decoder, but display only the newest ready output.
-   try{for(i in 0 until 32){val budget=if(i==0)waitUs else 0;val at=System.nanoTime();val n=c.dequeueOutputBuffer(info,budget);dequeueOverrunMaxUs=maxOf(dequeueOverrunMaxUs,(System.nanoTime()-at)/1000-budget)
-    if(n>=0){inFlight=maxOf(0,inFlight-1);if(latest>=0){release(latest,false);skipped++};latest=n;latestPts=info.presentationTimeUs}
-    else if(n==MediaCodec.INFO_OUTPUT_FORMAT_CHANGED)log("video_output_format_changed")
-    else if(n!=MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED)break
-   }}finally{if(latest>=0){val render=target===videoTarget&&target.surface?.isValid==true;release(latest,render);if(render){frames++;renderedVideoFrames++;surfaceFrames++;if(surfaceFrames==1)log("video_surface_first_frame")};decodeMaxMs=maxOf(decodeMaxMs,(System.nanoTime()/1000-latestPts)/1000);if(render&&frames==1){diagnostic?.invoke("first frame rendered");log("video_rendered_frames=1")}}}
+ override fun setVideoRecoveryHandler(type:Int,handler:()->Unit){
+  synchronized(videoRecoveryLock){recovery=handler;lastRecoveryNs=0}
+ }
+ override fun onVideoConfig(type:Int,codecData:ByteArray){
+  synchronized(videoTargetLock){
+   if(closed.get()||videoFailed.get()||!videoTarget.input.configure(codecData))return
+   latestVideoConfig=codecData.copyOf()
   }
-  try{while(!closed.get()) {
-   if(target!==videoTarget){dispose();target=videoTarget;surfaceFrames=0;videoInput.dropped();log("video_surface_changed attached=${target.surface!=null}");if(target.surface?.isValid==true)requestRecovery("surface_restored")}
-   if(target.surface?.isValid!=true){dispose();Thread.sleep(50);continue}
-   try {
-   // Drain before waiting for a new frame. Sparse updates must not delay already decoded output by 100ms.
-   drain()
-   if(pending==null){
-    // When decoding is in flight, wait on the codec's completion, not a queue timer.
-    // Ready output wakes immediately; a 5ms cap still lets new input/surface changes through.
-    pending=videoInput.poll(if(inFlight==0)100 else 0)
-    if(pending==null&&inFlight>0){drain(5000);pending=videoInput.poll(0)}
+  log("video_configuration_changed eventType=video_configured streamType=$type payloadBytes=${codecData.size}")
+ }
+ override fun onVideoFrame(type:Int,naluBytes:ByteArray){receiveVideo(type,naluBytes,false,0L,System.nanoTime())}
+ override fun onOwnedVideoFrame(type:Int,naluBytes:ByteArray,senderNanos:Long,arrivalNanos:Long){
+  receiveVideo(type,naluBytes,true,senderNanos,arrivalNanos)
+ }
+ private fun receiveVideo(type:Int,bytes:ByteArray,owned:Boolean,senderNs:Long,arrivalNs:Long){
+  if(bytes.isEmpty())return
+  var logKeyframe=false
+  val result=synchronized(videoTargetLock){
+   if(closed.get()||videoFailed.get())return
+   receivedVideo=true
+   val target=videoTarget
+   if(target.surface?.isValid!=true)return
+   if(type==STREAM_TYPE_MAIN_SCREEN)calibration?.received(senderNs,arrivalNs,bytes.size)
+   val offered=if(owned)target.input.offerOwned(bytes,senderNs,arrivalNs) else target.input.offer(bytes,senderNs,arrivalNs)
+   if(offered.acceptedKeyframe&&!firstVideoKeyframe){firstVideoKeyframe=true;logKeyframe=true}
+   offered
+  }
+  if(logKeyframe)log("video_keyframe_queued eventType=video_first_keyframe streamType=$type payloadBytes=${bytes.size}")
+  result.recoveryReason?.let{requestRecovery(it)}
+ }
+ private fun requestRecovery(reason:String){
+  val queued=synchronized(videoRecoveryLock){
+   val handler=recovery?:return
+   val now=System.nanoTime()
+   if(closed.get()||(lastRecoveryNs!=0L&&now-lastRecoveryNs<TimeUnit.SECONDS.toNanos(2)))return
+   try{
+    recoveryWork.execute{if(!closed.get()&&recovery===handler)runCatching{handler()}}
+    lastRecoveryNs=now
+    true
+   }catch(_:RejectedExecutionException){false}
+  }
+  if(queued)log("video_recovery reason=$reason")
+ }
+ private class SubmittedVideo(val generation:Long,val senderNs:Long,val arrivedNs:Long,val submittedNs:Long)
+ private class DecodedVideo(
+  val index:Int,val generation:Long,val size:Int,val flags:Int,val arrivedNs:Long,
+  val readyNs:Long,val deadlineNs:Long,
+ )
+ private fun startDecoder(format:MediaFormat,surface:Surface,name:String?):MediaCodec{
+  val decoder=if(name==null)MediaCodec.createDecoderByType("video/avc") else MediaCodec.createByCodecName(name)
+  try{
+   decoder.configure(format,surface,null,0)
+   decoder.start()
+   return decoder
+  }catch(error:Exception){
+   runCatching{decoder.release()}
+   throw error
+  }
+ }
+ private fun videoLoop(){
+  var codec:MediaCodec?=null
+  var configured:ByteArray?=null
+  var buffers:Array<ByteBuffer>?=null
+  var inputIndex=-1
+  var target=videoTarget
+  var generation=target.input.generation
+  var pending:VideoInput.Frame?=null
+  var held:DecodedVideo?=null
+  val submitted=LinkedHashMap<Long,SubmittedVideo>()
+  var lastPts=0L
+  var decoderActivityNs:Long?=null
+  val pacing=VideoPlayoutTiming()
+  val info=MediaCodec.BufferInfo()
+  var stage="waiting_config"
+  var surfaceFrames=0
+  var firstInput=false
+  var firstOutput=false
+  var lastStats=System.nanoTime()
+  var windowFrames=0
+  var skipped=0
+  var retiredDrops=0
+  var retiredPeak=0
+  var queueMaxMs=0L
+  var decodeMaxMs=0L
+  var receiveToSurfaceMaxMs=0L
+  var lastSurfaceNs=0L
+  var surfaceGapMaxMs=0L
+  var releaseMaxUs=0L
+  var dequeueOverrunMaxUs=0L
+  var inputMaxUs=0L
+  var inFlightPeak=0
+  var paceHeldFrames=0
+  var paceHoldMaxMs=0L
+  var pressureSkips=0
+  var earlyInputReleases=0
+  var inputReadyAfterEarlyRelease=0
+
+  fun release(index:Int,render:Boolean){
+   val current=codec?:return
+   val at=System.nanoTime()
+   current.releaseOutputBuffer(index,render)
+   releaseMaxUs=maxOf(releaseMaxUs,(System.nanoTime()-at)/1000)
+  }
+  fun releaseHeld(render:Boolean):Boolean{
+   val output=held?:return false
+   held=null
+   stage="surface_release"
+   val show=render&&!closed.get()&&target===videoTarget&&target.input.generation==output.generation&&
+    target.surface?.isValid==true
+   release(output.index,show)
+   if(!show){skipped++;return false}
+   val renderedAt=System.nanoTime()
+   val firstOnSurface=synchronized(videoTargetLock){
+    if(closed.get()||target!==videoTarget||target.input.generation!=output.generation||target.surface?.isValid!=true)return false
+    calibration?.submitted(output.arrivedNs,renderedAt)
+    renderedVideoFrames++
+    surfaceFrames++
+    surfaceFrames==1
    }
-   val packet=pending
-   if(packet!=null&&packet.config!==configured){stage="configure";require(target.surface?.isValid==true){"Video Surface is invalid"};runCatching{codec?.stop()};runCatching{codec?.release()};codec=null
-    val(sps,pps)=MediaCodecSupport.avcParameterSets(packet.config);require(sps.isNotEmpty()&&pps.isNotEmpty()){"Invalid AVC parameter sets"}
-    val format=MediaFormat.createVideoFormat("video/avc",width,height);format.setByteBuffer("csd-0",ByteBuffer.wrap(byteArrayOf(0,0,0,1)+sps));format.setByteBuffer("csd-1",ByteBuffer.wrap(byteArrayOf(0,0,0,1)+pps));format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,1024*1024)
-    val c=MediaCodec.createDecoderByType("video/avc");codec=c;c.configure(format,target.surface,null,0);c.start();buffers=c.inputBuffers;inFlight=0;configured=packet.config
-    // Codec metadata only, not image/audio contents. Allows offline checking of
-    // reference/reorder requirements before attempting vendor decoder tuning.
-    val spsDiagnostic=if(sps.size<=256)com.shilapi.xcertplay.compat.Base64Compat.encode(sps) else "oversize"
-    log("video_decoder_started name=default-avc width=$width height=$height sps=$spsDiagnostic")
+   windowFrames++
+   if(lastSurfaceNs!=0L)surfaceGapMaxMs=maxOf(surfaceGapMaxMs,(renderedAt-lastSurfaceNs)/1000000)
+   lastSurfaceNs=renderedAt
+   if(output.arrivedNs!=0L)receiveToSurfaceMaxMs=maxOf(receiveToSurfaceMaxMs,(renderedAt-output.arrivedNs)/1000000)
+   if(output.deadlineNs>output.readyNs){
+    paceHeldFrames++
+    paceHoldMaxMs=maxOf(paceHoldMaxMs,(renderedAt-output.readyNs)/1000000)
    }
-   val c=codec?:continue
-   if(packet!=null){stage="input";val inputAt=System.nanoTime();val index=c.dequeueInputBuffer(5000)
-    if(index>=0){val buffer=buffers!![index];buffer.clear();val byteCount=VideoBufferWriter.putAnnexB(packet.bytes,buffer);queueMaxMs=maxOf(queueMaxMs,(System.nanoTime()-packet.arrivedNs)/1000000);c.queueInputBuffer(index,0,byteCount,System.nanoTime()/1000,0);inFlight++;inFlightPeak=maxOf(inFlightPeak,inFlight);pending=null}
-    // A brief busy decoder is normal. Retain this reference frame instead of destroying the GOP every 20ms.
-    else if(System.nanoTime()-packet.arrivedNs>TimeUnit.MILLISECONDS.toNanos(250)){pending=null;videoInput.dropped();requestRecovery("decoder_backpressure")}
-    inputMaxUs=maxOf(inputMaxUs,(System.nanoTime()-inputAt)/1000)
+   if(firstOnSurface)log("video_surface_first_frame eventType=video_surface_frame frameCount=$renderedVideoFrames outputSize=${output.size} outputFlags=${output.flags} surfaceValid=true")
+   if(renderedVideoFrames==1L)log("video_rendered_frames=1")
+   if(firstOnSurface)diagnostic?.invoke("first frame rendered")
+   return true
+  }
+  fun dispose(){
+   runCatching{releaseHeld(false)}
+   runCatching{codec?.stop()}
+   runCatching{codec?.release()}
+   codec=null
+   configured=null
+   buffers=null
+   inputIndex=-1
+   pending=null
+   submitted.clear()
+   decoderActivityNs=null
+   pacing.reset()
+  }
+  fun takeSubmitted(pts:Long):SubmittedVideo?{
+   submitted.remove(pts)?.let{return it}
+   // Some legacy components do not echo the timestamp. An unknown output cannot be paced.
+   val iterator=submitted.values.iterator()
+   if(!iterator.hasNext())return null
+   val fallback=iterator.next()
+   iterator.remove()
+   return SubmittedVideo(fallback.generation,0L,fallback.arrivedNs,fallback.submittedNs)
+  }
+  fun drain(waitUs:Long=0L){
+   val current=codec?:return
+   stage="drain"
+   val drainStartedAt=System.nanoTime()
+   val oldestArrived=held?.arrivedNs?:submitted.values.firstOrNull()?.arrivedNs?:drainStartedAt
+   val pressure=VideoPlayoutTiming.underPressure(target.input.size(),submitted.size,drainStartedAt-oldestArrived,surfaceFrames==0)
+   when(VideoPlayoutTiming.drainAction(held?.deadlineNs,drainStartedAt,pressure)){
+    VideoPlayoutTiming.DrainAction.WAIT_FOR_HELD->return
+    VideoPlayoutTiming.DrainAction.RENDER_HELD->{releaseHeld(true);return}
+    VideoPlayoutTiming.DrainAction.DEQUEUE->Unit
    }
-   drain()
-   val now=System.nanoTime();if(now-lastStats>=TimeUnit.SECONDS.toNanos(5)){log("video_progress rendered=$frames skippedOutput=$skipped queued=${videoInput.size()} queueMaxMs=$queueMaxMs decodeMaxMs=$decodeMaxMs releaseMaxUs=$releaseMaxUs dequeueOverrunMaxUs=$dequeueOverrunMaxUs inputMaxUs=$inputMaxUs inFlightPeak=$inFlightPeak");lastStats=now;queueMaxMs=0;decodeMaxMs=0;releaseMaxUs=0;dequeueOverrunMaxUs=0;inputMaxUs=0;inFlightPeak=inFlight}
-   }catch(e:Throwable){if(e is InterruptedException)throw e;if(target!==videoTarget||target.surface?.isValid!=true){dispose();videoInput.dropped();log("video_surface_unavailable stage=$stage; session retained")}else throw e}
-  }}catch(e:InterruptedException){}catch(e:Throwable){if(!closed.get()){videoFailed.set(true);videoInput.clear();log("video_failed stage=$stage type=${e.javaClass.simpleName} detail=${e.message} surfaceValid=${target.surface?.isValid} at=${e.stackTrace.take(4).joinToString()}");onVideoFailure?.invoke(e)}}finally{runCatching{codec?.stop()};runCatching{codec?.release()}}
+   // Keep ordered decoded frames in the codec during normal playout. Coalesce only when
+   // a real input backlog is building, keeping all H.264 references in the decoder.
+   for(i in 0 until 16){
+    val budget=if(i==0)waitUs else 0L
+    val at=System.nanoTime()
+    val index=current.dequeueOutputBuffer(info,budget)
+    val now=System.nanoTime()
+    dequeueOverrunMaxUs=maxOf(dequeueOverrunMaxUs,(now-at)/1000-budget)
+    if(index==MediaCodec.INFO_OUTPUT_FORMAT_CHANGED){log("video_output_format_changed");continue}
+    if(index==MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED)continue
+    if(index<0)break
+    val codecConfig=info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG!=0
+    val emptyEnd=info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM!=0&&info.size==0
+    if(codecConfig||emptyEnd){release(index,false);continue}
+    val stamp=takeSubmitted(info.presentationTimeUs)
+    decoderActivityNs=now
+    if(stamp==null||stamp.generation!=target.input.generation||target!==videoTarget){
+     release(index,false)
+     skipped++
+     continue
+    }
+    decodeMaxMs=maxOf(decodeMaxMs,(now-stamp.submittedNs)/1000000)
+    if(held!=null){releaseHeld(false);pressureSkips++;calibration?.skipped(now)}
+    val deadline=pacing.deadline(stamp.senderNs,stamp.arrivedNs,now,
+     surfaceFrames==0||pressure||now-stamp.arrivedNs>=VideoInput.MAX_DELTA_AGE_NS)
+    held=DecodedVideo(index,stamp.generation,info.size,info.flags,stamp.arrivedNs,now,deadline)
+    if(!firstOutput){firstOutput=true;log("video_decoder_output eventType=video_first_output outputSize=${info.size} outputFlags=${info.flags}")}
+    if(!pressure)break
+   }
+   if(held?.let{pressure||System.nanoTime()>=it.deadlineNs}==true)releaseHeld(true)
+  }
+  fun reportWindow(){
+   val now=System.nanoTime()
+   val windowMs=(now-lastStats)/1000000
+   if(windowMs<5000L)return
+   val metrics=target.input.takeMetrics()
+   log("video_progress eventType=video_render_window streamType=110 windowMs=$windowMs submittedFrames=$windowFrames "+
+    "skippedFrames=$skipped queueDepth=${metrics.depth} queuePeak=${maxOf(retiredPeak,metrics.peak)} "+
+    "droppedFrames=${retiredDrops+metrics.dropped} queueMaxMs=$queueMaxMs decodeMaxMs=$decodeMaxMs "+
+    "receiveToSurfaceMaxMs=$receiveToSurfaceMaxMs surfaceGapMaxMs=$surfaceGapMaxMs releaseMaxUs=$releaseMaxUs "+
+    "dequeueOverrunMaxUs=$dequeueOverrunMaxUs inputMaxUs=$inputMaxUs inFlightPeak=$inFlightPeak "+
+    "paceHeldFrames=$paceHeldFrames paceHoldMaxMs=$paceHoldMaxMs pressureSkips=$pressureSkips "+
+    "earlyInputReleases=$earlyInputReleases inputReadyAfterEarlyRelease=$inputReadyAfterEarlyRelease")
+   lastStats=now
+   windowFrames=0;skipped=0;retiredDrops=0;retiredPeak=0;queueMaxMs=0;decodeMaxMs=0
+   receiveToSurfaceMaxMs=0;surfaceGapMaxMs=0;releaseMaxUs=0;dequeueOverrunMaxUs=0
+   inputMaxUs=0;inFlightPeak=submitted.size;paceHeldFrames=0;paceHoldMaxMs=0;pressureSkips=0
+   earlyInputReleases=0;inputReadyAfterEarlyRelease=0
+  }
+  try{
+   while(!closed.get()){
+    if(target!==videoTarget){
+     dispose()
+     val retired=target.input.takeMetrics()
+     retiredDrops+=retired.dropped
+     retiredPeak=maxOf(retiredPeak,retired.peak)
+     target=videoTarget
+     generation=target.input.generation
+     surfaceFrames=0
+     lastSurfaceNs=0
+     log("video_surface_changed surfaceValid=${target.surface?.isValid==true}")
+     if(target.surface?.isValid==true)requestRecovery("surface_restored")
+    }
+    if(target.surface?.isValid!=true){
+     dispose()
+     synchronized(videoTargetLock){
+      if(!closed.get()&&target===videoTarget&&target.surface?.isValid!=true){
+       // A detached view needs no polling. An OEM Surface may become valid in place.
+       if(target.surface==null)videoTargetLock.wait()else videoTargetLock.wait(50)
+      }
+     }
+     continue
+    }
+    try{
+     if(generation!=target.input.generation){
+      releaseHeld(false)
+      pacing.reset()
+      generation=target.input.generation
+      if(pending?.generation!=generation)pending=null
+     }
+     drain()
+     if(pending==null){
+      val activity=MediaDecoderActivity.waiting(submitted.size,decoderActivityNs,System.nanoTime(),surfaceFrames==0)
+      pending=target.input.poll(0L)
+      if(pending==null&&activity&&held==null){drain(5000);pending=target.input.poll(0L)}
+      if(pending==null&&(!activity||held!=null)){
+       val wait=held?.let{(it.deadlineNs-System.nanoTime()).coerceAtLeast(0L)}?:100_000_000L
+       pending=target.input.poll(wait)
+      }
+     }
+     if(target!==videoTarget)continue
+     val packet=pending
+     if(packet==null){reportWindow();continue}
+     if(packet.generation!=target.input.generation){pending=null;continue}
+     if(packet.config!==configured){
+      stage="configure"
+      require(target.surface?.isValid==true){"Video Surface is invalid"}
+      dispose()
+      pending=packet
+      val(sps,pps)=MediaCodecSupport.avcParameterSets(packet.config)
+      require(sps.isNotEmpty()&&pps.isNotEmpty()){"Invalid AVC parameter sets"}
+      val format=MediaFormat.createVideoFormat("video/avc",width,height)
+      format.setByteBuffer("csd-0",ByteBuffer.wrap(byteArrayOf(0,0,0,1)+sps))
+      format.setByteBuffer("csd-1",ByteBuffer.wrap(byteArrayOf(0,0,0,1)+pps))
+      format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,VideoInput.MAX_FRAME_BYTES)
+      val outputSurface=checkNotNull(target.surface)
+      val preferred=preferredAvcDecoder
+      var selected=preferred
+      val current=if(preferred==null)startDecoder(format,outputSurface,null) else try{
+       startDecoder(format,outputSurface,preferred)
+      }catch(error:Exception){
+       if(target!==videoTarget||!outputSurface.isValid)throw error
+       selected=null
+       log("video_decoder_fallback eventType=video_decoder_fallback codec=$preferred errorType=${error.javaClass.simpleName}")
+       startDecoder(format,outputSurface,null)
+      }
+      codec=current
+      buffers=current.inputBuffers
+      configured=packet.config
+      videoDecoderName=selected?:runCatching{MediaCodec::class.java.getMethod("getName").invoke(current) as? String}.getOrNull()?:"platform_auto"
+      log("video_decoder_started eventType=video_decoder_started codec=$videoDecoderName width=$width height=$height payloadBytes=${packet.config.size}")
+     }
+     val current=codec?:continue
+     stage="input"
+     val inputAt=System.nanoTime()
+     fun frameIsCurrent()=!closed.get()&&target===videoTarget&&target.surface?.isValid==true&&
+      packet.generation==target.input.generation
+     fun stale(at:Long):Boolean{
+      val age=at-packet.arrivedNs
+      return age>VideoInput.MAX_DELTA_AGE_NS&&
+       (age>VideoInput.MAX_IDR_AGE_NS||!(packet.startsGop||VideoInput.isKeyframe(packet.bytes)))
+     }
+     if(!frameIsCurrent()){pending=null;continue}
+     if(stale(inputAt)){
+      pending=null
+      if(target.input.reject(packet,inputAt))requestRecovery("decoder_backpressure")
+      reportWindow()
+      continue
+     }
+     if(inputIndex<0){
+      var earlyRelease=false
+      val inputBuffers=buffers!!
+      if(inputBuffers.size==1&&packet.bytes.size>inputBuffers[0].capacity()){
+       pending=null
+       if(target.input.reject(packet,inputAt))requestRecovery("codec_input_capacity")
+       reportWindow()
+       continue
+      }
+      inputIndex=VideoCodecInput.acquire(inputBuffers.size,held?.let{it.deadlineNs-inputAt},current::dequeueInputBuffer){
+       val releaseAt=System.nanoTime()
+       if(!frameIsCurrent()||stale(releaseAt))false
+       else{
+        val beforeDeadline=held?.let{it.deadlineNs>releaseAt}==true
+        releaseHeld(true).also{
+         if(it){
+          earlyRelease=beforeDeadline
+          if(earlyRelease)earlyInputReleases++
+          stage="input"
+         }
+        }
+       }
+      }
+      if(earlyRelease&&inputIndex>=0)inputReadyAfterEarlyRelease++
+     }
+     val now=System.nanoTime()
+     if(!frameIsCurrent()){pending=null;continue}
+     if(stale(now)){
+      pending=null
+      if(target.input.reject(packet,now))requestRecovery("decoder_backpressure")
+     }else if(inputIndex>=0){
+      val buffer=buffers!![inputIndex]
+      buffer.clear()
+      val byteCount=try{VideoBufferWriter.putAnnexB(packet.bytes,buffer)}catch(_:IllegalArgumentException){0}
+      if(byteCount==0){
+       pending=null
+       if(target.input.reject(packet,now))requestRecovery(if(packet.bytes.size>buffer.capacity())"codec_input_capacity" else "invalid_nal_unit")
+      }else{
+       val submittedAt=System.nanoTime()
+       val pts=maxOf(submittedAt/1000,lastPts+1)
+       lastPts=pts
+       current.queueInputBuffer(inputIndex,0,byteCount,pts,0)
+       inputIndex=-1
+       if(submitted.size>=64){val staleStamp=submitted.keys.iterator();staleStamp.next();staleStamp.remove()}
+       submitted[pts]=SubmittedVideo(packet.generation,packet.senderNs,packet.arrivedNs,submittedAt)
+       queueMaxMs=maxOf(queueMaxMs,(submittedAt-packet.arrivedNs)/1000000)
+       inFlightPeak=maxOf(inFlightPeak,submitted.size)
+       decoderActivityNs=submittedAt
+       pending=null
+       if(!firstInput){firstInput=true;log("video_decoder_input eventType=video_first_input payloadBytes=$byteCount")}
+      }
+     }
+     inputMaxUs=maxOf(inputMaxUs,(System.nanoTime()-inputAt)/1000)
+     reportWindow()
+    }catch(error:Throwable){
+     if(error is InterruptedException)throw error
+     if(target!==videoTarget||target.surface?.isValid!=true){
+      dispose()
+      target.input.discardFrames()
+      log("video_surface_unavailable eventType=video_surface_unavailable stage=$stage surfaceValid=${target.surface?.isValid==true}")
+     }else throw error
+    }
+   }
+  }catch(_:InterruptedException){
+  }catch(error:Throwable){
+   if(!closed.get()){
+    synchronized(videoTargetLock){videoFailed.set(true);videoTarget.input.retire()}
+    log("video_failed eventType=video_decoder_failure stage=$stage errorType=${error.javaClass.simpleName} surfaceValid=${target.surface?.isValid==true}")
+    onVideoFailure?.invoke(error)
+   }
+  }finally{
+   dispose()
+  }
  }
  @Synchronized override fun onAudioStarted(id:AudioStreamId,format:com.shilapi.xcertplay.airplay.AudioFormat,firstSample:Int){if(closed.get())return;log("audio_stream_start type=${id.type} kind=${id.audioType} codec=${format.codec} rate=${format.sampleRate} channels=${format.channels} payloadType=${format.payloadType} firstRtpSample=${firstSample.toLong() and 0xffffffffL}");val previous=audio.keys.filter{it.type==id.type&&it.audioType==id.audioType};for(key in previous)audio.remove(key)?.let{it.close();check(it.released()){"Previous audio worker is still releasing"}};val role=LegacyAudioPolicy.role(id.type,format.audioType);val callMode=role=="call";if(callMode){routing?.beginCallAudio();CallDuplexAB.callStreamStarting(routing?.captureContext())};try{audio[id]=AudioOutput(id,format,callMode)}catch(t:Throwable){if(callMode)routing?.endCallAudio();throw t}}
  override fun onAudioRtp(id:AudioStreamId,format:com.shilapi.xcertplay.airplay.AudioFormat,rtp:ByteArray,sample:Int){audio[id]?.offer(rtp,sample)}
@@ -366,7 +721,7 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
  override fun close(){if(!closed.compareAndSet(false,true))return
   val outputs:List<AudioOutput>;val inputs:List<Microphone>
   synchronized(this){outputs=audio.values.toList();audio.clear();inputs=microphones.values.toList();microphones.clear()}
-  recoveryWork.shutdownNow();videoInput.clear();videoThread.interrupt()
+  recoveryWork.shutdownNow();synchronized(videoTargetLock){calibration=null;videoTarget.input.retire();latestVideoConfig=null};videoThread.interrupt()
   for(a in outputs)a.close();for(m in inputs)m.close()
   if(!MediaWorkers.await(videoThread))log("video_release_pending");playbackFocus?.close();routing?.close()
  }

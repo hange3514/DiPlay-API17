@@ -125,8 +125,8 @@ class AirPlaySession(
     private val notified = AtomicBoolean(false)
     private val failureEvidenceLogged = AtomicBoolean(false)
     private var eventServer: ServerSocket? = null
-    private var eventSocket: Socket? = null
-    private var eventCipher: ControlCipher? = null
+    @Volatile private var eventSocket: Socket? = null
+    @Volatile private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
     private var pendingNightMode: Boolean? = null
     private val firstTouchSendLogged = AtomicBoolean(false)
@@ -364,6 +364,9 @@ class AirPlaySession(
             false
         }
     }
+
+    internal fun canSendInput(): Boolean =
+        !closed.get() && eventSocket?.isClosed == false && eventCipher != null
 
     fun sendTouch(contacts: List<AirPlayContact>): Boolean {
         val scaled = contacts.map {

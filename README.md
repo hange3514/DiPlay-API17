@@ -15,7 +15,7 @@
 
 | 版本 | 下载 | 连接与安装 |
 | --- | --- | --- |
-| **有线 CarPlay 0.44.50** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.50/DiPlay_API17_0.44.50-wheel-media-confirm-beta.apk) | USB 数据线连接 iPhone。[发布说明、安装与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.50) |
+| **有线 CarPlay 0.44.51** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.51/DiPlay_API17_0.44.51.apk) | USB 数据线连接 iPhone，支持最高 60 FPS 配置与双指触控转发。[发布说明、安装与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.51) |
 | **无线 CarPlay 0.1.104** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.104/DiPlay_API17_0.1.104-wifi-direct-default.apk) | 绿联 CM591（`10D7:B012`）配对，iPhone 自动加入车机的 Wi-Fi Direct 局域网。[发布说明、安装与校验](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.104) |
 
 ## 适配交流
@@ -36,13 +36,13 @@
 
 我此前把自己的车辆年款误写为 2017 款。经重新确认，实际测试车辆是 **2018 款比亚迪宋 DM**。此前错误说明可能误导读者，我为此郑重致歉，相关车型信息现已同步更正。
 
-## 0.44.50 更新摘要
+## 0.44.51 有线版更新摘要
 
-- 修复方向盘上一曲、下一曲间歇失效。投屏显示首帧后申请媒体键接收权，断开后释放。
-- 增加媒体键接收权回读、收键和转发的诊断记录。
-- 延续 0.44.49 的免 VPN 有线连接、麦克风降噪、界面和连接预热。
+- 移植无线版的 H.264 硬解优先、解码队列与画面节奏优化，增加车机画面测试与推荐配置。
+- 投屏尺寸为 1024 × 600，默认使用 60 FPS，可切换到 15、20、30、40 或 50 FPS。
+- 支持同时向 iPhone 转发两个触点。兼容的 CarPlay 地图应用可在车机屏幕上双指缩放。
 
-安装步骤与文件校验见 [0.44.50 发布说明](docs/RELEASE_0.44.50.md)。
+60 FPS 和高德地图双指缩放已在上述车辆的无线 0.1.109 上实测通过。有线版新增功能的实车验证状态见 [0.44.51 发布说明](docs/RELEASE_0.44.51.md)。
 
 ## 隐私与发布内容
 
@@ -52,6 +52,6 @@
 
 ## 构建
 
-- 有线源码在 `legacy/`，参见 [有线构建说明](docs/BUILD.md)。本次发布的内部版本名为 `0.44.50-wheel-media-confirm-beta`。
+- 有线源码在 `legacy/`，参见 [有线构建说明](docs/BUILD.md)。
 - 无线源码在 [`wireless-v0.1.104` 标签的 `legacy-wireless/`](https://github.com/hange3514/DiPlay-API17/tree/wireless-v0.1.104/legacy-wireless)，参见 [无线构建说明](https://github.com/hange3514/DiPlay-API17/blob/wireless-v0.1.104/legacy-wireless/BUILD.md)。
 - API 17 编译所需工具链及 Android SDK 组件需自行准备。自签名 APK 要和车机上已有版本签名一致才能覆盖安装。 [历史版本](https://github.com/hange3514/DiPlay-API17/releases)

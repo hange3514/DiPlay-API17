@@ -1,6 +1,5 @@
 package com.shilapi.xcertplay.airplay
 
-import android.util.Log
 import java.io.Closeable
 import java.io.InputStream
 import java.io.BufferedInputStream
@@ -22,7 +21,12 @@ enum class VideoCodec { H264, H265 }
  * (avcC/hvcC) or a ChaCha20-Poly1305 sealed VideoFrame. The key is the DataStream output key
  * and the per-frame nonce is an 8-byte little-endian counter.
  */
-class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String) -> Unit = {}, private val bindAddress: InetAddress = local.headunit.diplay.LegacySockets.anyAddress()) : Closeable {
+class ScreenStream(
+    private val key: ByteArray,
+    private val onDiagnostic: (String) -> Unit = {},
+    private val bindAddress: InetAddress = local.headunit.diplay.LegacySockets.anyAddress(),
+    private val streamType: Int = STREAM_TYPE_MAIN_SCREEN,
+) : Closeable {
     interface Listener {
         fun onCodec(codec: VideoCodec) {}
         fun onConfig(codecData: ByteArray) {}
@@ -83,7 +87,7 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
 
     private fun run(sock: Socket) {
         var failure: Throwable? = null
-        val stats = StreamReceiveStats("video", onDiagnostic)
+        val stats = StreamReceiveStats("video eventType=video_rx_window streamType=$streamType", onDiagnostic, video = true)
         try {
             // A buffered read may return immediately with available data: this is not
             // an extra frame queue and never waits to fill the 16KiB buffer.
@@ -94,6 +98,7 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
                 if (!readFully(input, header)) break
                 val bodySize = readU32Le(header, 0)
                 if (bodySize < 0 || bodySize > MAX_BODY) throw IOException("Invalid video body size")
+                stats.videoHeaderReceived()
                 val body = ByteArray(bodySize)
                 if (!readFully(input, body)) throw EOFException("Truncated video body")
                 val arrivalNanos = System.nanoTime()
@@ -124,18 +129,17 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
                 } else {
                     body
                 }
-                if (firstFrameLogged.compareAndSet(false, true)) {
-                    Log.i(
-                        TAG,
-                        "video first decrypted frame sealed=${body.size} plain=${payload.size} " +
-                        "head=${payload.hexPrefix(16)} chacha=${if(local.headunit.diplay.NativeCrypto.available) "Monocypher-native" else AirPlayCrypto.chachaImplementation}",
-                    )
+                if (payload.isNotEmpty() && firstFrameLogged.compareAndSet(false, true)) {
+                    runCatching { onDiagnostic("screen_video eventType=screen_first_payload payloadBytes=${payload.size}") }
                 }
-                listener.onFrame(ScreenCodec.lengthPrefixedToAnnexB(payload), ScreenCodec.senderNanos(header), arrivalNanos)
+                val frame = ScreenCodec.lengthPrefixedToAnnexB(payload)
+                val senderNanos = ScreenCodec.senderNanos(header)
+                if (frame.isNotEmpty()) stats.videoFrame(senderNanos, arrivalNanos)
+                listener.onFrame(frame, senderNanos, arrivalNanos)
             }
             OP_VIDEO_CONFIG -> {
                 val (codec, codecData) = ScreenCodec.detectConfig(body)
-                Log.i(TAG, "video codec config codec=$codec body=${body.size} data=${codecData.size}")
+                runCatching { onDiagnostic("screen_video eventType=screen_config codec=$codec payloadBytes=${codecData.size}") }
                 listener.onCodec(codec)
                 listener.onConfig(codecData)
             }
@@ -157,7 +161,6 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
     }
 
     private companion object {
-        const val TAG = "xcertplay-usb"
         const val HEADER_LEN = 128
         const val OPCODE_OFFSET = 4
         const val OP_VIDEO_FRAME = 0
@@ -165,9 +168,6 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
         const val MAX_BODY = 8 * 1024 * 1024
     }
 }
-
-private fun ByteArray.hexPrefix(length: Int): String =
-    take(length).joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
 /** Extracts the avcC/hvcC codec-data record from a VideoConfig payload. */
 object ScreenCodec {
@@ -203,7 +203,7 @@ object ScreenCodec {
         while (offset + 4 <= payload.size) {
             val length = readU32Be(payload, offset)
             offset += 4
-            if (length <= 0 || offset + length > payload.size) return payload
+            if (length <= 0 || length > payload.size - offset) return payload
             offset += length
         }
         if (offset != payload.size) return payload

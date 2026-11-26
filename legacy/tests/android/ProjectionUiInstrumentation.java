@@ -106,7 +106,7 @@ public class ProjectionUiInstrumentation extends Instrumentation {
  }
  void frameRateSelection()throws Exception {
   android.content.SharedPreferences p=activity.getSharedPreferences("playback",0);boolean had=p.contains("fps");int old=p.getInt("fps",30);
-  try{p.edit().putInt("fps",60).commit();check(PlaybackOptions.read(activity)==15,"Legacy 60fps preference must not override fixed 15fps");p.edit().remove("fps").commit();check(PlaybackOptions.read(activity)==15,"Fresh profile must use 15fps");}
+  try{p.edit().putInt("fps",30).commit();check(PlaybackOptions.read(activity)==30,"Saved 30fps preference was ignored");PlaybackOptions.save(activity,50);check(PlaybackOptions.read(activity)==50,"Selected 50fps failed to persist");p.edit().remove("fps").commit();check(PlaybackOptions.read(activity)==60,"Fresh profile must use 60fps");}
   finally{if(had)p.edit().putInt("fps",old).commit();else p.edit().remove("fps").commit();}
   for(int route=0;route<3;route++)check(activity.getPackageManager().resolveActivity(AccessibilityEntry.intent(route),0)!=null,"Accessibility route unresolved on stock API17");
   check((AccessibilityEntry.intent(3).getFlags()&android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)!=0,"Fresh settings route must recreate task");

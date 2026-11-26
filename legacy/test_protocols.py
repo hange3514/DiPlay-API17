@@ -1,6 +1,9 @@
 from pathlib import Path
 import os,subprocess,zipfile
 import build
+json_runtime=Path(os.environ.get('DIPLAY_TEST_JSON_JAR', build.TC/'android-json-test.jar'))
+if not json_runtime.is_file():
+    raise SystemExit('Set DIPLAY_TEST_JSON_JAR to a JVM org.json implementation (the Android SDK jar contains stubs).')
 P=build.ROOT.parent/'shared/src/test/java/com/shilapi/xcertplay'
 names={
  'compat':['Base64CompatTest'],
@@ -12,7 +15,7 @@ files=[P/folder/(name+'.kt') for folder,ns in names.items() for name in ns]
 files=[f for f in files if f.exists()]
 files+=list((build.ROOT/'tests').glob('*.kt'))
 support=[build.ROOT/'tests/retired-probes/TlsSelfTest.kt']
-cp=os.pathsep.join(str(x) for x in [build.BUILD/'core.jar',build.BUILD/'java.jar',build.TC/'android.jar',build.TC/'kotlin-stdlib.jar',build.TC/'junit.jar',build.TC/'hamcrest.jar',build.TC/'bcprov.jar',build.TC/'bctls.jar',build.TC/'bcutil.jar'])
+cp=os.pathsep.join(str(x) for x in [build.BUILD/'core.jar',build.BUILD/'java.jar',json_runtime,build.TC/'android.jar',build.TC/'kotlin-stdlib.jar',build.TC/'junit.jar',build.TC/'hamcrest.jar',build.TC/'bcprov.jar',build.TC/'bctls.jar',build.TC/'bcutil.jar'])
 args=['-no-stdlib','-no-reflect','-jvm-target','1.8','-classpath',cp,'-Xfriend-paths='+str(build.BUILD/'core.jar'),'-d',str(build.BUILD/'tests.jar'),*[str(f) for f in files+support]]
 af=build.BUILD/'test.args';af.write_text('\n'.join('"'+s.replace('\\','/')+'"' for s in args),encoding='utf-8')
 build.run([build.JAVA,'-Dfile.encoding=UTF-8','-Xmx2g','-cp',build.TC/'*','org.jetbrains.kotlin.cli.jvm.K2JVMCompiler','@'+str(af)],'test-compile')

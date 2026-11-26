@@ -44,7 +44,7 @@ class MicrophonePacketizerTest {
     fun pcmIsConvertedToBigEndian() {
         assertArrayEquals(
             byteArrayOf(0x12, 0x34, 0x56, 0x78),
-            MicrophonePacketizer.toWirePcm(
+            MicrophonePacketizer.toCarPlayMicrophoneWirePcm(
                 byteArrayOf(0x34, 0x12, 0x78, 0x56),
             ),
         )
