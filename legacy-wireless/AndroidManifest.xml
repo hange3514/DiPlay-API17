@@ -1,7 +1,8 @@
 <?xml version='1.0' encoding='utf-8'?>
- <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="local.headunit.diplay.hybrid" android:versionCode="105" android:versionName="0.1.104-wifi-direct-default">
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="local.headunit.diplay.hybrid" android:versionCode="118" android:versionName="0.1.117-auto-evidence">
  <uses-sdk android:minSdkVersion="17" android:targetSdkVersion="17" />
  <uses-permission android:name="android.permission.INTERNET" />
+ <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
  <uses-permission android:name="android.permission.BLUETOOTH" />
  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -13,6 +14,8 @@
  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
  <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+ <uses-feature android:name="android.hardware.location" android:required="false" />
+ <uses-feature android:name="android.hardware.location.gps" android:required="false" />
  <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
  <uses-feature android:name="android.hardware.microphone" android:required="false" />
  <application android:name="local.headunit.diplay.DiPlayApplication" android:icon="@drawable/ic_carplay" android:label="DiPlay &#26080;&#32447; CarPlay" android:theme="@style/DiPlayTheme" android:allowBackup="false">

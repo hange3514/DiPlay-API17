@@ -93,6 +93,19 @@ final class CompatibilityTools {
     private static final Set<String> ALSA_TOKEN_FIELDS = set("profileKey", "source", "audioType", "result", "fallbackTarget", "stage", "phase");
     private static final Pattern DIAGNOSTIC_TOKEN = Pattern.compile("([A-Za-z][A-Za-z0-9_]*)=([^\\s;]+)");
     private static final Pattern MUSIC_SUMMARY_NUMBER = Pattern.compile("-?[0-9]{1,16}");
+    private static final String VIDEO_RX_WINDOW = "video_rx_window";
+    private static final String VIDEO_RENDER_WINDOW = "video_render_window";
+    private static final int MAX_VIDEO_WINDOWS_PER_STAGE = 18;
+    private static final Set<String> VIDEO_RECEIVE_FIELDS = set(
+        "streamType", "requestedFps", "windowMs", "packets", "bytes", "receivedFrames", "receivedFpsMilli",
+        "senderGapSamples", "senderGapMaxMs", "arrivalGapMaxMs", "deliveryJitterMaxMs",
+        "readMaxMs", "headerReadMaxMs", "bodyReadMaxMs", "readsOver250Ms", "processMaxUs",
+        "decryptAvgUs", "decryptMaxUs");
+    private static final Set<String> VIDEO_RENDER_FIELDS = set(
+        "streamType", "requestedFps", "windowMs", "submittedFrames", "submittedFpsMilli", "skippedFrames",
+        "queueDepth", "queuePeak", "droppedFrames", "queueMaxMs", "decodeMaxMs", "surfaceGapMaxMs",
+        "releaseMaxUs", "dequeueOverrunMaxUs", "inputMaxUs", "inFlightPeak", "receiveToSurfaceMaxMs",
+        "paceHeldFrames", "paceHoldMaxMs", "pressureSkips", "earlyInputReleases", "inputReadyAfterEarlyRelease");
     private static final Pattern REPORT_EVENT_TYPE = Pattern.compile("[A-Za-z][A-Za-z0-9_]{0,63}");
     private static final Set<String> MUSIC_SUMMARY_FIELDS = set(
         "inputQueuedMs", "bufferTargetMs", "playbackRate", "decodeInputMaxUs", "queueMaxAgeMs",
@@ -266,7 +279,9 @@ final class CompatibilityTools {
 
     private static String privacyText() {
         return "\u5728\u7ebf\u66f4\u65b0\u67e5\u8be2\u4f1a\u53d1\u9001\u8f66\u673a\u578b\u53f7\u3001Android \u7248\u672c\u3001\u5c4f\u5e55\u89c4\u683c\u548c\u5f53\u524d APK \u7248\u672c\u7528\u4e8e\u5339\u914d\u3002\u624b\u52a8\u63d0\u4ea4\u65f6\u4f1a\u4e0a\u4f20\u4f60\u586b\u5199\u7684\u95ee\u9898\u8bf4\u660e\u548c\u8bca\u65ad\u4e8b\u4ef6\uff0c\u5305\u62ec\u542f\u52a8\u81ea\u542f\u52a8\u3001USB VID/PID \u4e0e\u6743\u9650\u3001CM591 HCI/RFCOMM\u3001Wi-Fi \u7f51\u5361/IP/\u9891\u6bb5/RSSI\u3001iAP2 \u9636\u6bb5\u548c AirPlay \u63a5\u5165/\u89e3\u7801\u7ed3\u679c\u3002\u9519\u8bef\u4e8b\u4ef6\u4f1a\u9644\u4e0a\u8131\u654f\u540e\u7684\u9519\u8bef\u539f\u56e0\u6458\u8981\u3002\u4e0d\u4e0a\u4f20 Wi-Fi \u540d\u79f0\u3001\u53e3\u4ee4\u3001BSSID/\u84dd\u7259\u786c\u4ef6\u5730\u5740\u3001\u624b\u673a\u6807\u8bc6\u3001\u539f\u8f66\u7cfb\u7edf\u84dd\u7259\u5e93\u6587\u4ef6\u6216\u8fde\u7eed\u97f3\u89c6\u9891\u3002\u7cfb\u7edf\u5df2\u4fdd\u5b58\u7684 Wi-Fi \u53e3\u4ee4\u82e5\u7528\u4e8e iAP2 \u5907\u7528\u6a21\u5f0f\uff0c\u4ec5\u5728\u8fde\u63a5\u65f6\u77ed\u6682\u8bfb\u5165\u5185\u5b58\uff0c\u4e0d\u4fdd\u5b58\u548c\u4e0a\u4f20\u3002" +
+            "\n\n提交日志会自动附带可读取的原厂车型代码、固件版本、ALSA 声卡和节点、通话诊断及方向盘按键事件。" +
             "\n\n主动准备的短时测试录音可在确认时选择加密附带。录音只采集车机麦克风，可用于排查 Siri、语音输入或通话中的杂音。" +
+            "\n\n主动运行车机能力检测会保存大灯状态、原车 CAN 广播样本、系统陀螺仪和横摆通道的采样结果、GPS 定位计数、导航协议计数和系统编解码能力，不保存经纬度、路线内容或额外录音。" +
             "\n\n选择「附带热点排查信息」会提交热点状态、接口地址、系统可读的崩溃线索和列出的原车系统文件，发送到这套无线版的私人服务器。" +
             "\n\n\u62a5\u544a\u53ea\u4f1a\u63d0\u4ea4\u5230 USB+Wi-Fi \u5b9e\u9a8c\u7248\u7684\u72ec\u7acb\u8def\u5f84\u3002\u4e0a\u4f20\u6210\u529f\u540e\u4f1a\u6e05\u7406\u672c\u5730\u5df2\u786e\u8ba4\u6536\u5230\u7684\u65e5\u5fd7\uff0c\u670d\u52a1\u5668\u62a5\u544a\u4e0d\u81ea\u52a8\u8fc7\u671f\u3002\u5f53\u524d\u4e0a\u4f20\u4f7f\u7528 HTTP\uff0c\u8bf7\u4ec5\u5728\u63a5\u53d7\u6b64\u65b9\u5f0f\u65f6\u63d0\u4ea4\u3002";
     }
@@ -460,7 +475,7 @@ final class CompatibilityTools {
         input.setText(draft);
         input.setSelection(input.length());
         TextView hint = new TextView(activity);
-        hint.setText("请简要描述发生了什么。仅提交日志时，可填写「环境检查」。");
+        hint.setText("只需描述遇到的问题。车机、声卡、通话和方向盘诊断由程序自动附带。");
         hint.setPadding(0, 0, 0, 10);
         LinearLayout box = new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
         int pad = Math.round(16 * activity.getResources().getDisplayMetrics().density);
@@ -481,6 +496,9 @@ final class CompatibilityTools {
         android.widget.Button clearLogs = new android.widget.Button(activity);
         clearLogs.setText("清空本地日志");
         box.addView(clearLogs);
+        android.widget.Button vehicleCheck = new android.widget.Button(activity);
+        vehicleCheck.setText("车机能力检测");
+        box.addView(vehicleCheck);
         if (hotspotSupported) {
             final Intent developerSettings = new Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
                     .setPackage("com.android.settings");
@@ -523,6 +541,19 @@ final class CompatibilityTools {
             public void onClick(View view) {
                 dialog.dismiss();
                 confirmClearLogs(activity);
+            }
+        });
+        vehicleCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (!activity.resumed || activity.closed || activity.vehicleCapabilityCheck != null) return;
+                final String text = input.getText().toString();
+                final boolean withHotspot = hotspotSupported && hotspot.isChecked();
+                final boolean withCarLife = carLife.isChecked();
+                final String withMic = attach.isChecked() ? micId : null;
+                dialog.dismiss();
+                activity.vehicleCapabilityCheck = new VehicleCapabilityCheck(activity,
+                    new Runnable() { @Override public void run() { askIssue(activity, text, withMic, withHotspot, withCarLife); }});
+                activity.vehicleCapabilityCheck.start();
             }
         });
         box.requestFocus();
@@ -636,6 +667,8 @@ final class CompatibilityTools {
             try {
                 FilteredEvents filtered = filterEvents(DiagnosticLog.reportRows(activity));
                 String version = activity.getPackageManager().getPackageInfo(activity.getPackageName(), 0).versionName;
+                CompatibilityEvidence.appendIdentity(filtered.events, VehicleIdentityEvidence.collect(activity));
+                CompatibilityEvidence.appendAlsaInventory(filtered.events, CompatibilityEvidence.alsaEnvironment(activity));
                 JSONObject body = new JSONObject().put("productId", "hybrid-usb-wifi").put("profile", profile(activity)).put("appVersion", version)
                     .put("issue", issue).put("events", filtered.events).put("oemArtifacts", new JSONArray())
                     .put("clientReportId", newClientReportId());
@@ -981,30 +1014,69 @@ final class CompatibilityTools {
         for (DiagnosticLog.Entry row : source) first = Math.min(first, row.time);
         if (first == Long.MAX_VALUE) first = 0;
         int bytes = 0;
+        int videoReceiveWindows = 0;
+        int videoRenderWindows = 0;
         int priorityLimit = 400;
         int priorityBytes = 192 * 1024;
-        // Reserve space for restart and failure evidence, then connection events and recent logs.
-        for (int pass = 0; pass < 3; pass++) {
-            int budget = pass == 0 ? 48 * 1024 : pass == 1 ? priorityBytes : maximumBytes;
-            int limit = pass == 0 ? 64 : pass == 1 ? priorityLimit : maximumEvents;
+        // Preserve one complete CAN and motion capture alongside restart and connection evidence.
+        int canBytes = 0;
+        int canEvents = 0;
+        int compatibilityBytes = 0;
+        int compatibilityEvents = 0;
+        int wheelEvents = 0, audioEvents = 0;
+        for (int pass = 0; pass < 5; pass++) {
+            int budget = Math.min(maximumBytes, pass == 0 ? 48 * 1024 : pass == 1 ? bytes + 320 * 1024
+                    : pass == 2 ? bytes + 80 * 1024
+                    : pass == 3 ? canBytes + compatibilityBytes + priorityBytes : maximumBytes);
+            int limit = pass == 0 ? 64 : pass == 1 ? selected.size() + 380
+                    : pass == 2 ? selected.size() + 104
+                    : pass == 3 ? canEvents + compatibilityEvents + priorityLimit : maximumEvents;
             int parsed = 0;
+            int startBytes = bytes;
+            int startCount = selected.size();
             for (int i = source.size() - 1; i >= 0 && selected.size() < limit &&
                     budget - bytes >= 128 && parsed < limit + 128; i--) {
                 DiagnosticLog.Entry row = source.get(i);
                 if (selectedIds.contains(row.id) || !REPORT_EVENT_TYPE.matcher(row.type).matches()) continue;
-                if (pass == 0 && !isRestartEvidence(row.type) || pass == 1 && !isHighValueDiagnostic(row.type)) continue;
-                parsed++;
+                if (pass == 0 && !isRestartEvidence(row.type) ||
+                        pass == 1 && !"VEHICLE_CAN_EVIDENCE".equals(row.type) ||
+                        pass == 2 && !CompatibilityEvidence.isWheel(row.type) &&
+                            !CompatibilityEvidence.isAudio(row.type) && !row.alsaDiagnostic ||
+                        pass == 3 && !isHighValueDiagnostic(row.type)) continue;
                 JSONObject event;
                 try {
                     event = filteredEvent(row, first);
                 } catch (org.json.JSONException invalidRow) {
                     continue;
                 }
+                String type = event.getString("type");
+                boolean wheel = CompatibilityEvidence.isWheel(type);
+                boolean audio = CompatibilityEvidence.isAudio(type);
+                if (pass == 2 && !(wheel && wheelEvents < 32 || audio && audioEvents < 72)) continue;
+                parsed++;
+                String eventType = event.getJSONObject("data").optString("eventType");
+                boolean videoReceive = VIDEO_RX_WINDOW.equals(eventType);
+                boolean videoRender = VIDEO_RENDER_WINDOW.equals(eventType);
+                if ((videoReceive && videoReceiveWindows >= MAX_VIDEO_WINDOWS_PER_STAGE) ||
+                        (videoRender && videoRenderWindows >= MAX_VIDEO_WINDOWS_PER_STAGE)) continue;
                 int size = event.toString().getBytes("UTF-8").length + 2;
                 if (size > budget - bytes) continue;
                 bytes += size;
+                if (videoReceive) videoReceiveWindows++;
+                if (videoRender) videoRenderWindows++;
                 selectedIds.add(row.id);
                 selected.add(new EventCandidate(i, event, row.id));
+                if (pass == 2) {
+                    if (wheel) wheelEvents++;
+                    if (audio) audioEvents++;
+                }
+            }
+            if (pass == 1) {
+                canBytes = bytes - startBytes;
+                canEvents = selected.size() - startCount;
+            } else if (pass == 2) {
+                compatibilityBytes = bytes - startBytes;
+                compatibilityEvents = selected.size() - startCount;
             }
         }
         java.util.Collections.sort(selected, new java.util.Comparator<EventCandidate>() {
@@ -1047,12 +1119,18 @@ final class CompatibilityTools {
                 else if (ALSA_SUMMARY_FIELDS.contains(key) && value instanceof String && SAFE_ALSA_SUMMARY.matcher((String) value).matches()) safe.put(key, value);
             }
         }
+        String videoEvent = videoWindowEvent(type, detailText);
+        if (videoEvent != null) {
+            appendVideoWindow(safe, videoEvent, detailText);
+            return new JSONObject().put("offsetMs", offset).put("type", type).put("data", safe);
+        }
         String code = diagnosticCode(type, detailText);
         if (!code.isEmpty()) safe.put("diagnosticCode", code);
         String musicEvent = musicDiagnosticEvent(type, detailText);
         if (!musicEvent.isEmpty()) safe.put("eventType", musicEvent);
         String summary = diagnosticSummary(type, detailText, !musicEvent.isEmpty() || isSpeechDiagnostic(type));
         if (!summary.isEmpty()) safe.put("diagnosticSummary", summary);
+        CompatibilityEvidence.addRuntimeContext(type, detail, safe);
         if ("PROCESS_RECOVERY".equals(type) && detail != null) {
             String continuity = detail.optString("recoveryContinuity");
             if (SAFE_TOKEN.matcher(continuity).matches()) {
@@ -1083,6 +1161,46 @@ final class CompatibilityTools {
         return new JSONObject().put("offsetMs", offset).put("type", type).put("data", safe);
     }
 
+    private static String videoWindowEvent(String type, String detail) {
+        if ("AIRPLAY".equals(type) && detail.startsWith("Receive: video eventType=" + VIDEO_RX_WINDOW + " ")) {
+            return VIDEO_RX_WINDOW;
+        }
+        if ("MEDIA".equals(type) && detail.startsWith("video_progress eventType=" + VIDEO_RENDER_WINDOW + " ")) {
+            return VIDEO_RENDER_WINDOW;
+        }
+        return null;
+    }
+
+    private static void appendVideoWindow(JSONObject out, String event, String detail) throws Exception {
+        out.put("eventType", event);
+        boolean receive = VIDEO_RX_WINDOW.equals(event);
+        Set<String> fields = receive ? VIDEO_RECEIVE_FIELDS : VIDEO_RENDER_FIELDS;
+        java.util.regex.Matcher matcher = DIAGNOSTIC_TOKEN.matcher(detail);
+        while (matcher.find()) {
+            String key = matcher.group(1);
+            String value = matcher.group(2);
+            if (receive && "ended".equals(key) && ("true".equals(value) || "false".equals(value))) {
+                out.put(key, Boolean.parseBoolean(value));
+            } else if (fields.contains(key) && MUSIC_SUMMARY_NUMBER.matcher(value).matches()) {
+                long count = Long.parseLong(value);
+                if (count >= 0 && count <= 1000000000L) out.put(key, count);
+            }
+        }
+        long windowMs = out.optLong("windowMs");
+        if (!receive && windowMs > 0 && out.has("submittedFrames") && !out.has("submittedFpsMilli")) {
+            long fpsMilli = out.optLong("submittedFrames") * 1000000L / windowMs;
+            if (fpsMilli <= 1000000000L) out.put("submittedFpsMilli", fpsMilli);
+        }
+        // Older servers drop newly introduced structured keys. Preserve the same bounded,
+        // allowlisted measurements in the existing compatible summary column.
+        StringBuilder summary = new StringBuilder("eventType=").append(event);
+        for (String key : fields) {
+            if (out.has(key)) summary.append(' ').append(key).append('=').append(out.getLong(key));
+        }
+        if (out.has("ended")) summary.append(" ended=").append(out.getBoolean("ended"));
+        out.put("diagnosticSummary", summary.toString());
+    }
+
     private static boolean isAlsaDiagnostic(String text) {
         return text.startsWith("microphone_alsa_") || text.startsWith("microphone_duplex_evidence ") || text.startsWith("microphone_capture_path=") || text.startsWith("microphone_capture_fallback ");
     }
@@ -1092,7 +1210,11 @@ final class CompatibilityTools {
     }
 
     private static boolean isHighValueDiagnostic(String type) {
-        return "WHEEL_KEY".equals(type) || "WHEEL_CONTROL".equals(type) || "USB_DEVICE".equals(type) ||
+        return "VIDEO_CALIBRATION_SAMPLE".equals(type) || "VIDEO_CALIBRATION_RESULT".equals(type) ||
+            "VEHICLE_CAPABILITY_CHECK".equals(type) || "VEHICLE_INTEGRATION".equals(type) ||
+            "VEHICLE_YAW_ESTIMATE".equals(type) ||
+            "TOUCH_MULTITOUCH".equals(type) ||
+            "WHEEL_KEY".equals(type) || "WHEEL_CONTROL".equals(type) || "USB_DEVICE".equals(type) ||
             "APP_STARTUP".equals(type) || "BOOT_AUTOSTART".equals(type) || "USB_DEFAULT_HANDLER".equals(type) ||
             "USB_PERMISSION_REQUEST".equals(type) || "USB_PERMISSION_RESULT".equals(type) || "USB_PERMISSION_WAIT".equals(type) ||
             "USBMUX_WRITE_TIMING".equals(type) || "NCM_WRITE_TIMING".equals(type) ||

@@ -38,7 +38,7 @@ public final class AudioRouting implements Closeable {
  public synchronized void endCallAudio(){if(callAudioUsers<=0)return;if(--callAudioUsers>0)return;AudioManager a=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);try{int callStream=stream("call");if(ownsCallMode&&a.getMode()==LegacyAudioPolicy.callMode())a.setMode(previousCallMode);if(ownsCallSpeaker&&a.isSpeakerphoneOn()==LegacyAudioPolicy.callSpeakerphone())a.setSpeakerphoneOn(previousCallSpeaker);if(ownsCallVolume&&a.getStreamVolume(callStream)==callMaxVolume)a.setStreamVolume(callStream,previousCallVolume,0);callRouteLog("call_audio_route_restored",previousCallMode,a.getMode(),null);}catch(Exception e){callRouteLog("call_route_restore_failed",previousCallMode,a.getMode(),e.getClass().getSimpleName());}finally{ownsCallVolume=false;ownsCallMode=false;ownsCallSpeaker=false;previousCallMode=AudioManager.MODE_NORMAL;previousCallVolume=0;callMaxVolume=0;previousCallSpeaker=false;if(callUsbAssert!=null)callUsbAssert.callEnded();}}
  private void callRouteLog(String detail,int before,int after,String error){try{AudioManager a=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);int callStream=stream("call");boolean platformPhoneStrategy=LegacyAudioPolicy.usesPlatformPhoneStrategy(secondMusic);JSONObject j=new JSONObject().put("detail",detail).put("previousMode",before).put("activeMode",after).put("platformPhoneStrategy",platformPhoneStrategy).put("modePreservedForOemRoute",!platformPhoneStrategy&&before==after).put("speakerphoneForced",platformPhoneStrategy).put("activeSpeakerphone",a.isSpeakerphoneOn()).put("speakerphonePreservedForOemRoute",!platformPhoneStrategy&&a.isSpeakerphoneOn()==previousCallSpeaker).put("previousSpeakerphone",previousCallSpeaker).put("outputStream",callStream).put("focusStream",LegacyAudioPolicy.callFocusStream(secondMusic)).put("clientFocusRequested",LegacyAudioPolicy.usesClientCallFocus(secondMusic)).put("previousVolume",previousCallVolume).put("activeVolume",a.getStreamVolume(callStream)).put("maxVolume",a.getStreamMaxVolume(callStream)).put("volumePolicy",platformPhoneStrategy?"maximize_dedicated_call":"preserve_shared_media").put("volumeMaxAccepted",ownsCallVolume).put("oemBtPhoneSourceRequested",false).put("audioSystem",AudioSystemEvidence.routingSnapshot(a,context));if(error!=null)j.put("error",error);MainActivity.record(context,"CALL_AUDIO_ROUTE",j);}catch(Exception ignored){}}
  public static void logCallOutput(Context context,AudioTrack track,final int stream,final String phase,
-                                  final long written,final long head,final float gain){
+                                  final long written,final long head,final float gain,final String pcmSummary){
   if(!CALL_OUTPUT_DIAGNOSTIC_PENDING.compareAndSet(false,true))return;
   boolean submitted=false;
   try{
@@ -55,17 +55,34 @@ public final class AudioRouting implements Closeable {
     @Override public void run(){
      try{
       AudioManager audio=(AudioManager)app.getSystemService(Context.AUDIO_SERVICE);
+      int volume=audio.getStreamVolume(stream);
+      int maxVolume=audio.getStreamMaxVolume(stream);
+      JSONObject routePolicy=AudioRouteProbe.snapshot(audio);
+      JSONObject audioSystem=AudioSystemEvidence.routingSnapshot(audio,app);
+      long routeSnapshotAgeMs=SystemClock.elapsedRealtime()-capturedAt;
+      StringBuilder summary=new StringBuilder(pcmSummary)
+          .append(" streamVolume=").append(volume).append(" streamMax=").append(maxVolume)
+          .append(" routeSnapshotAgeMs=").append(routeSnapshotAgeMs);
+      JSONArray outputDevices=audioSystem.optJSONArray("streamOutputDevices");
+      if(outputDevices!=null)for(int i=0;i<outputDevices.length();i++){
+       JSONObject device=outputDevices.optJSONObject(i);
+       if(device==null||device.optInt("stream",-1)!=stream)continue;
+       if(device.has("deviceMask"))summary.append(" outputDeviceMask=0x")
+           .append(Integer.toHexString(device.getInt("deviceMask")));
+       break;
+      }
       JSONObject row=new JSONObject()
           .put("phase",phase).put("mode",audio.getMode()).put("stream",stream)
-          .put("streamVolume",audio.getStreamVolume(stream)).put("streamMax",audio.getStreamMaxVolume(stream))
+          .put("streamVolume",volume).put("streamMax",maxVolume)
           .put("speakerphone",audio.isSpeakerphoneOn()).put("bluetoothSco",audio.isBluetoothScoOn())
           .put("bluetoothA2dp",audio.isBluetoothA2dpOn()).put("wiredHeadset",audio.isWiredHeadsetOn())
           .put("microphoneMuted",audio.isMicrophoneMute()).put("musicActive",audio.isMusicActive())
-          .put("routePolicy",AudioRouteProbe.snapshot(audio)).put("audioSystem",AudioSystemEvidence.routingSnapshot(audio,app))
+          .put("routePolicy",routePolicy).put("audioSystem",audioSystem)
           .put("trackPresent",trackPresent).put("writtenBytes",written).put("playbackHeadFrames",head)
-          .put("trackGain",gain).put("trackCapturedElapsedMs",capturedAt)
-          .put("routeSnapshotAgeMs",SystemClock.elapsedRealtime()-capturedAt)
+          .put("trackCapturedElapsedMs",capturedAt).put("routeSnapshotAgeMs",routeSnapshotAgeMs)
+          .put("diagnosticSummary",summary.toString())
           .put("evidenceScope","AudioTrack queue consumption only; no amplifier loopback");
+      if(!Float.isNaN(gain)&&!Float.isInfinite(gain))row.put("trackGain",gain);
       if(trackPresent)row.put("trackState",trackState).put("playState",playState).put("sessionId",sessionId)
           .put("nativeRate",AudioTrack.getNativeOutputSampleRate(stream));
       MainActivity.record(app,"CALL_OUTPUT_DIAG",row);

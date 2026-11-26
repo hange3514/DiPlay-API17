@@ -311,9 +311,10 @@ object Iap2ControlMessages {
     )
 
     fun locationInformation(nmeaSentence: String): Iap2Frame {
-        require(nmeaSentence.isNotEmpty()) { "NMEA sentence must not be empty" }
+        val sentences = nmeaSentence.lineSequence().filter { it.isNotBlank() }.toList()
+        require(sentences.isNotEmpty()) { "NMEA sentence must not be empty" }
         return Iap2Messages.build(Iap2Endpoints.LOCATION_INFORMATION) {
-            string(0, nmeaSentence)
+            for (sentence in sentences) string(0, "$sentence\r\n")
         }
     }
 }

@@ -8,7 +8,6 @@ import java.util.GregorianCalendar
 import java.util.Locale
 import java.util.TimeZone
 import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.min
 
 /** One Android location sample converted into the fields carried by the NMEA pair. */
@@ -20,6 +19,7 @@ data class CarPlayLocationFix(
     val speedMetersPerSecond: Double? = null,
     val accuracyMeters: Double? = null,
     val timestampMillis: Long? = null,
+    val satelliteCount: Int? = null,
 ) {
     init {
         require(latitudeDegrees.isFinite() && latitudeDegrees in -90.0..90.0) {
@@ -43,6 +43,13 @@ interface Iap2LocationProvider : java.io.Closeable {
 
     fun latestNmea(): String?
 
+    fun onSent() = Unit
+
+    /** An independently subscribed PASCD sentence can be sent without a GNSS fix. */
+    fun latestVehicleSpeedNmea(): String? = null
+
+    fun onVehicleSpeedSent() = Unit
+
     override fun close() {
         stop()
     }
@@ -50,7 +57,7 @@ interface Iap2LocationProvider : java.io.Closeable {
 
 /** LIVI-compatible $GPGGA + $GPRMC encoding used by iAP2 0xFFFB. */
 object NmeaLocationEncoder {
-    fun encode(fix: CarPlayLocationFix): String {
+    fun encode(fix: CarPlayLocationFix, includeGga: Boolean = true, includeRmc: Boolean = true): String {
         val timestamp = fix.timestampMillis
             ?.takeIf { it > 0 }
             ?.let(::ofEpochMilli)
@@ -65,23 +72,20 @@ object NmeaLocationEncoder {
 
         val latitude = degreesToNmea(fix.latitudeDegrees, latitude = true)
         val longitude = degreesToNmea(fix.longitudeDegrees, latitude = false)
-        val hdop = fix.accuracyMeters
-            ?.takeIf { it.isFinite() && it > 0 }
-            ?.let { min(50.0, max(0.5, it / 5.0)) }
-            ?: 1.0
         val altitude = fix.altitudeMeters
             ?.takeIf { it.isFinite() }
             ?.let { format("%.1f", it) }
-            ?: "0.0"
+            .orEmpty()
+        val satellites = fix.satelliteCount
+            ?.takeIf { it in 0..99 }?.let { format("%02d", it) }.orEmpty()
 
         val ggaBody = "GPGGA,$time,${latitude.value},${latitude.hemisphere}," +
-            "${longitude.value},${longitude.hemisphere},1,08,${format("%.1f", hdop)}," +
-            "$altitude,M,0.0,M,,"
+            "${longitude.value},${longitude.hemisphere},1,$satellites,," +
+            "$altitude,M,,M,,"
         val speedKnots = fix.speedMetersPerSecond
             ?.takeIf { it.isFinite() && it >= 0 }
             ?.let { format("%.2f", it * KNOTS_PER_METER_PER_SECOND) }
-            ?: "0.00"
-        // Without a GPS direction (for example while parked) the course stays empty: 0.00 would say north.
+            .orEmpty()
         val course = fix.bearingDegrees
             ?.takeIf { it.isFinite() }
             ?.let { format("%.2f", it) }
@@ -89,7 +93,10 @@ object NmeaLocationEncoder {
         val rmcBody = "GPRMC,$time,A,${latitude.value},${latitude.hemisphere}," +
             "${longitude.value},${longitude.hemisphere},$speedKnots,$course,$date,,"
 
-        return "$${ggaBody}*${checksum(ggaBody)}\r\n$${rmcBody}*${checksum(rmcBody)}\r\n"
+        return buildString {
+            if (includeGga) append("$${ggaBody}*${checksum(ggaBody)}\r\n")
+            if (includeRmc) append("$${rmcBody}*${checksum(rmcBody)}\r\n")
+        }
     }
 
     private fun degreesToNmea(value: Double, latitude: Boolean): NmeaCoordinate {
@@ -205,12 +212,25 @@ class Iap2LocationReporter(
 
     private fun sendLatest(send: (Iap2Frame) -> Unit) {
         lastAttemptNanos = nanoTime()
-        val sentence = provider?.latestNmea() ?: return
-        send(Iap2LocationMessages.locationInformation(sentence))
+        val source = provider ?: return
+        val position = readSentence(source::latestNmea)
+        val speed = readSentence(source::latestVehicleSpeedNmea)
+        if (position == null && speed == null) return
+        val announcements = listOfNotNull(position, speed).joinToString("\r\n")
+        send(Iap2LocationMessages.locationInformation(announcements))
+        if (position != null) source.onSent()
+        if (speed != null) source.onVehicleSpeedSent()
         if (!sentLogged) {
             sentLogged = true
             onProgress("iap2 tx=0xfffb location-information")
         }
+    }
+
+    private fun readSentence(read: () -> String?): String? = try {
+        read()
+    } catch (error: Exception) {
+        onProgress("iap2 location provider read failed: ${error.javaClass.simpleName}")
+        null
     }
 
     private companion object {
@@ -222,6 +242,9 @@ object Iap2LocationMessages {
     const val START_LOCATION_INFORMATION = 0xfffa
     const val LOCATION_INFORMATION = 0xfffb
     const val STOP_LOCATION_INFORMATION = 0xfffc
+
+    const val GGA = 1
+    const val RMC = 2
 
     /** 0xFFFA selector for `$PASCD`; the matching IdentificationInformation flag is 20. */
     const val VEHICLE_SPEED_DATA = 4

@@ -27,6 +27,7 @@ public final class WheelControl extends BroadcastReceiver implements Closeable {
     private static final String ACTION = "APP_REV_DATA";
     private static final String OEM_PACKAGE = "com.byd.multimediaservice";
     private static final int KNOWN_SERVICE_VERSION = 382;
+    private static final long NON_KEY_FRAME_LOG_INTERVAL_MS = 15000L;
     static final long MAX_INPUT_AGE_MS = 600;
 
     private final Context context;
@@ -38,6 +39,9 @@ public final class WheelControl extends BroadcastReceiver implements Closeable {
     private final int oemServiceVersion;
     private volatile boolean closed;
     private volatile boolean registered;
+    // Accessed only by Android's broadcast callback on the main thread.
+    private long lastNonKeyLogAtMs = -1L;
+    private int nonKeyFrameCount;
 
     private static int serviceVersion(Context context) {
         try {
@@ -123,8 +127,12 @@ public final class WheelControl extends BroadcastReceiver implements Closeable {
             final int action = WheelKeyPolicy.decode(raw);
 
             if (action == 0) {
-                log(0, keyCode >= 0 ? "unmapped_oem_key" : "unrecognized_oem_frame",
-                    keyCode, length, header0, header1, null);
+                if (keyCode >= 0) {
+                    log(0, "unmapped_oem_key", keyCode, length, header0, header1, null);
+                } else {
+                    logNonKeyFrame(raw == null ? "missing_key_payload" : "unrecognized_oem_frame",
+                        length, null);
+                }
                 return;
             }
 
@@ -165,17 +173,33 @@ public final class WheelControl extends BroadcastReceiver implements Closeable {
                 log(action, "queue_full", keyCode, length, header0, header1, null);
             }
         } catch (Exception error) {
-            log(0, "invalid_event", -1, -1, -1, -1,
-                error.getClass().getSimpleName());
+            logNonKeyFrame("invalid_event", -1, error.getClass().getSimpleName());
         }
+    }
+
+    private void logNonKeyFrame(String result, int frameLength, String errorType) {
+        if (nonKeyFrameCount < Integer.MAX_VALUE) nonKeyFrameCount++;
+        long now = SystemClock.elapsedRealtime();
+        if (lastNonKeyLogAtMs >= 0 && now - lastNonKeyLogAtMs < NON_KEY_FRAME_LOG_INTERVAL_MS) return;
+        lastNonKeyLogAtMs = now;
+        // APP_REV_DATA also carries other OEM messages. Record only the shape
+        // and volume of frames outside the known key envelope.
+        log(0, result, -1, frameLength, -1, -1, errorType, nonKeyFrameCount);
+        nonKeyFrameCount = 0;
     }
 
     private void log(int action, String result, int keyCode, int frameLength,
                      int header0, int header1, String errorType) {
+        log(action, result, keyCode, frameLength, header0, header1, errorType, 0);
+    }
+
+    private void log(int action, String result, int keyCode, int frameLength,
+                     int header0, int header1, String errorType, int nonKeyFrames) {
         try {
             JSONObject row = new JSONObject()
                 .put("wheelAction", action)
                 .put("keyPath", "oem_broadcast")
+                .put("oemBroadcastAction", ACTION)
                 .put("result", result)
                 .put("knownProfileMatched", knownProfileMatched)
                 .put("receiverRegistered", registered)
@@ -186,6 +210,7 @@ public final class WheelControl extends BroadcastReceiver implements Closeable {
             if (header0 >= 0) row.put("oemHeader0", header0);
             if (header1 >= 0) row.put("oemHeader1", header1);
             if (errorType != null) row.put("errorType", errorType);
+            if (nonKeyFrames > 0) row.put("oemNonKeyFramesSinceLastSample", nonKeyFrames);
             MainActivity.record(context, "WHEEL_CONTROL", row);
         } catch (Exception ignored) { }
     }
@@ -196,7 +221,13 @@ public final class WheelControl extends BroadcastReceiver implements Closeable {
         closed = true;
         if (registered) {
             registered = false;
-            try { context.unregisterReceiver(this); } catch (Exception ignored) { }
+            try {
+                context.unregisterReceiver(this);
+                log(0, "receiver_unregistered", -1, -1, -1, -1, null);
+            } catch (Exception error) {
+                log(0, "receiver_unregister_failed", -1, -1, -1, -1,
+                    error.getClass().getSimpleName());
+            }
         }
         worker.shutdownNow();
     }

@@ -151,6 +151,7 @@ class CarPlayMediaEngine(
             expectedPeer = session.remoteAddress ?: return null,
             onDiagnostic = { detail -> session.logDebug(if (detail.startsWith("screen_video ")) "$detail streamType=$type" else detail) },
             bindAddress = session.localAddress ?: local.headunit.diplay.LegacySockets.anyAddress(),
+            streamType = type,
         )
         val owner = OwnedScreen(streamKey, screen)
         var previousAtKey: Closeable? = null
@@ -826,7 +827,6 @@ class CarPlayMediaEngine(
     private companion object {
         const val MICROPHONE_DOWNLINK_GRACE_MS = 500L
         const val TAG = "xcertplay-usb"
-        const val STREAM_TYPE_MAIN_SCREEN = 110
         const val STREAM_TYPE_ALT_SCREEN = 111
         const val STREAM_TYPE_MAIN_AUDIO = 100
         const val STREAM_TYPE_DATA = 130
@@ -839,6 +839,8 @@ class CarPlayMediaEngine(
         const val OPUS_48K = 0x40000000L
     }
 }
+
+internal const val STREAM_TYPE_MAIN_SCREEN = 110
 
 internal fun unsignedPlistDecimal(value: Any?): String? = when (value) {
     is Long -> local.headunit.diplay.NumericCompat.unsignedLong(value)

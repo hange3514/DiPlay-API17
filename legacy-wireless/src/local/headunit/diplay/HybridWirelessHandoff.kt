@@ -9,6 +9,7 @@ import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
+import com.shilapi.xcertplay.transport.Iap2LocationProvider
 import com.shilapi.xcertplay.transport.Iap2WirelessCarPlayEndpoint
 import com.shilapi.xcertplay.transport.Iap2WirelessControlClient
 import com.shilapi.xcertplay.transport.Iap2WirelessControlTerminal
@@ -37,6 +38,7 @@ internal class HybridWirelessHandoff(
     ipv6Address: Inet6Address?,
     private val phoneBluetoothAddress: () -> String?,
     private val onTunnelReady: () -> Unit = {},
+    private val locationProvider: () -> Iap2LocationProvider? = { null },
     private val report: (String, JSONObject) -> Unit,
 ) : Closeable {
     private val closed = AtomicBoolean(false)
@@ -213,6 +215,7 @@ internal class HybridWirelessHandoff(
                         identification = identification,
                         endpoint = endpoint,
                         timeoutMillis = Iap2WirelessControlClient.NO_TIMEOUT_MILLIS,
+                        locationProvider = if (identification.locationInformationEnabled) locationProvider() else null,
                         onReady = {
                             if (!closed.get() && !owner.isClosed && activeTunnel.get() === channel) {
                                 readyTunnelOwner.set(owner)
@@ -235,6 +238,10 @@ internal class HybridWirelessHandoff(
                                     report("HYBRID_IAP_TUNNEL", JSONObject().put("stage", "mfi_authenticated").put("success", true))
                                 line == "iap2 subscriptions sent" ->
                                     report("HYBRID_IAP_TUNNEL", JSONObject().put("stage", "subscriptions_sent").put("success", true))
+                                line.startsWith("iap2 rx=0xfffa ") || line.startsWith("iap2 rx=0xfffc ") ||
+                                    line.startsWith("iap2 tx=0xfffb ") ->
+                                    report("VEHICLE_INTEGRATION", JSONObject().put("stage", "location_protocol")
+                                        .put("diagnosticSummary", line.take(160)))
                                 line.startsWith("iap2 rx=0x4e0d wireless-carplay-update available=") ->
                                     report("HYBRID_IAP_TUNNEL", JSONObject()
                                         .put("stage", "wireless_update")

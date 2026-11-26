@@ -128,6 +128,11 @@ public class MainActivity extends Activity {
  private WifiPurpose currentWifiPurpose = WifiPurpose.CONNECT;
  private boolean leftForHotspotSettings;
  private AlertDialog hotspotPrompt;
+ private static final String FRAME_RATE_ACTION = "画面帧率";
+ private Button frameRateButton;
+ private AlertDialog frameRateDialog;
+ private final VideoCalibrationPanel videoCalibration = new VideoCalibrationPanel(this);
+ private ProjectionTouchInput projectionTouch;
  private enum UsbBtPermissionOperation { CONNECT, CANCELLED }
  private UsbDevice pendingUsbBtDevice, authorizedUsbBtDevice;
  private String runtimeReconnectPreviousId;
@@ -143,6 +148,7 @@ public class MainActivity extends Activity {
  static boolean interactionBusy(){MainActivity a=active;return a!=null&&!a.closed&&(a.startupBuilding||a.busy||a.maintenance||a.permissionPending||a.connectPending||a.connecting||UsbPermissionGate.permissionFlowActive());}
  static boolean isUsbPermissionPending(){MainActivity a=active;return a!=null&&!a.closed&&a.permissionPending;}
  final ExecutorService worker=Executors.newSingleThreadExecutor();TextView status;SurfaceView preview;volatile boolean closed;volatile NetworkDeadline updateRequest;boolean busy;ScrollView controls;boolean connecting;boolean projectionMode,videoReady;ConnectionProgressView connectionProgress;View videoBlank;TextView operationStatus;LinearLayout actionRow;int actionCount;StartupSplashView startupSplash;long activityStartedAt;boolean firstFrameLogged;String uiStage="CONNECT_START",probeAddress;
+ VehicleCapabilityCheck vehicleCapabilityCheck;
  public void onCreate(Bundle state){
   super.onCreate(state);
   active=this;
@@ -207,9 +213,12 @@ public class MainActivity extends Activity {
   if (!wifiDirect) button(root,"车载热点",new Runnable(){public void run(){showHotspotPassphraseDialog();}});
   button(root,"在线更新",new Runnable(){public void run(){CompatibilityTools.checkForUpdate(MainActivity.this);}});
   button(root,"提交日志",new Runnable(){public void run(){CompatibilityTools.open(MainActivity.this);}});
+  frameRateButton=button(root,FRAME_RATE_ACTION,new Runnable(){public void run(){showFrameRateDialog();}});
+  updateFrameRateButton();
   TextView footer=new TextView(this);footer.setText("\u6295\u5c4f\u65f6\u6309\u8fd4\u56de\u952e\u6253\u5f00\u63a7\u5236\u9762\u677f");footer.setTextSize(11);footer.setTextColor(0xff71869b);footer.setPadding(0,dp(18),0,dp(4));root.addView(footer);
   preview=new ProjectionSurface(this);preview.getHolder().setFixedSize(ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT);controls=new ScrollView(this);controls.setFillViewport(true);controls.setClipToPadding(false);controls.addView(root);FrameLayout outer=new FrameLayout(this);outer.setBackgroundColor(0xff050a12);outer.addView(preview,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));videoBlank=new View(this);videoBlank.setBackgroundColor(0xff050a12);videoBlank.setClickable(false);outer.addView(videoBlank,new FrameLayout.LayoutParams(-1,-1));connectionProgress=new ConnectionProgressView(this);connectionProgress.setVisibility(View.GONE);outer.addView(connectionProgress,new FrameLayout.LayoutParams(-1,-1));
   controls.setBackgroundDrawable(panelBackground());int screenWidth=getResources().getDisplayMetrics().widthPixels;int panelWidth=Math.max(dp(1),Math.min(screenWidth,Math.min(dp(420),Math.max(dp(320),screenWidth*44/100))));outer.addView(controls,new FrameLayout.LayoutParams(panelWidth,-1,Gravity.LEFT));ViewGroup splashParent=(ViewGroup)startupSplash.getParent();if(splashParent!=null)splashParent.removeView(startupSplash);outer.addView(startupSplash,new FrameLayout.LayoutParams(-1,-1));setContentView(outer);recordStartup("content_attached");
+  videoCalibration.attach(outer);
   outer.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener(){
    public boolean onPreDraw(){
     if(!firstFrameLogged){
@@ -231,11 +240,13 @@ public class MainActivity extends Activity {
     return true;
    }
   });
-  registerReceiver(portStatus,new IntentFilter("local.headunit.diplay.STATUS"));portReceiverRegistered=true;preview.setOnTouchListener(new View.OnTouchListener(){public boolean onTouch(View v,MotionEvent e){WiredService.touch(e.getActionMasked(),e.getX()/Math.max(1,preview.getWidth()),e.getY()/Math.max(1,preview.getHeight()));return true;}});
+  registerReceiver(portStatus,new IntentFilter("local.headunit.diplay.STATUS"));portReceiverRegistered=true;
+  projectionTouch=new ProjectionTouchInput();
+  preview.setOnTouchListener(projectionTouch);
   preview.getHolder().addCallback(new SurfaceHolder.Callback(){
    public void surfaceCreated(SurfaceHolder holder){onProjectionSurfaceAvailable();}
    public void surfaceChanged(SurfaceHolder holder,int format,int width,int height){onProjectionSurfaceAvailable();}
-   public void surfaceDestroyed(SurfaceHolder holder){WiredService.detachSurface(MainActivity.this);lifecycle("surface_destroyed");}
+   public void surfaceDestroyed(SurfaceHolder holder){projectionTouch.setEnabled(false);WiredService.detachSurface(MainActivity.this);lifecycle("surface_destroyed");}
   });
   uiBuilt=true;startupBuilding=false;if(resumed){restoreConnection();refreshVideoBlank();lifecycle("resume");}if(connectPending)scheduleConnection(0);
 
@@ -247,6 +258,7 @@ public class MainActivity extends Activity {
  private void onProjectionSurfaceAvailable(){
   if(closed||!resumed||!isProjectionSurfaceReady())return;
   WiredService.attachSurface(this,preview.getHolder().getSurface());
+  refreshVideoBlank();
   if(connectPending)scheduleConnection(0);
  }
  private boolean waitForProjectionDialog(){
@@ -716,9 +728,78 @@ public class MainActivity extends Activity {
   });
  }
 
+ void updateFrameRateButton() {
+  frameRateButton.setText(FRAME_RATE_ACTION + " " + PlaybackOptions.read(this) + " FPS");
+ }
+
+ private void showFrameRateDialog() {
+  final int[] rates = PlaybackOptions.rates();
+  final int current = PlaybackOptions.read(this);
+  final CharSequence[] labels = new CharSequence[rates.length];
+  for (int index = 0; index < rates.length; index++) {
+   int fps = rates[index];
+   String description;
+   switch (fps) {
+    case 15: description = "低负载"; break;
+    case 20: description = "均衡"; break;
+    case 30: description = "流畅优先"; break;
+    default: description = "高帧率试验";
+   }
+   labels[index] = fps + " FPS · " + description;
+  }
+  final boolean[] compare = {false};
+  frameRateDialog = new AlertDialog.Builder(this)
+      .setTitle("画面帧率（下次连接生效）")
+      .setSingleChoiceItems(labels, Arrays.binarySearch(rates, current), null)
+      .setNegativeButton("取消", null)
+      .setNeutralButton("自动对比", new DialogInterface.OnClickListener() {
+       public void onClick(DialogInterface dialog, int which) { compare[0] = true; }
+      })
+      .setPositiveButton("保存", new DialogInterface.OnClickListener() {
+       public void onClick(DialogInterface dialog, int which) {
+        int index = ((AlertDialog) dialog).getListView().getCheckedItemPosition();
+        if (closed || index < 0 || index >= rates.length) return;
+        int fps = rates[index];
+        PlaybackOptions.save(MainActivity.this, fps);
+        updateFrameRateButton();
+        showOperation("已保存 " + fps + " FPS。" + (connecting ? "停止后重新连接即可生效。" : "下次连接时生效。"));
+       }
+      }).create();
+  maintenance = true;
+  frameRateDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+   public void onDismiss(DialogInterface dialog) {
+    frameRateDialog = null;
+    maintenance = false;
+    if (!closed && connectPending) scheduleConnection(0);
+    if (compare[0]) showVideoCalibrationIntro();
+   }
+  });
+  frameRateDialog.show();
+ }
+
+ private void showVideoCalibrationIntro() {
+  if (closed || !resumed || busy || maintenance || videoCalibration.isActive()) return;
+  if (!WiredService.isVideoReady() || !videoReady) {
+   showOperation("先连上 CarPlay 并出画面，再打开「画面帧率」进行自动对比。");
+   return;
+  }
+  new AlertDialog.Builder(this)
+      .setTitle("自动对比画面流畅度")
+      .setMessage("请停车后选择一组。\n基础组：" + VideoCalibrationPanel.Group.BASIC.describeRates()
+          + "\n高帧率组：" + VideoCalibrationPanel.Group.HIGH.describeRates()
+          + "，40 FPS 以上为试验档。\n\n程序会自动切换档位。每轮请打开同一个列表并按提示持续滑动约 15 秒。采样时按返回键可取消。")
+      .setNegativeButton("取消", null)
+      .setNeutralButton("开始高帧对比", new DialogInterface.OnClickListener() {
+       public void onClick(DialogInterface dialog, int which) { videoCalibration.start(VideoCalibrationPanel.Group.HIGH); }
+      })
+      .setPositiveButton("开始基础对比", new DialogInterface.OnClickListener() {
+       public void onClick(DialogInterface dialog, int which) { videoCalibration.start(VideoCalibrationPanel.Group.BASIC); }
+      }).show();
+ }
+
  Drawable panelBackground(){GradientDrawable d=new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{0xf5121f30,0xf60b1421,0xf6080e18});d.setStroke(dp(1),0x222f5368);return d;}
  Drawable buttonBackground(String label,boolean pressed){boolean primary=label.equals("\u8fde\u63a5"),stop=label.equals("\u505c\u6b62");int color=primary?(pressed?0xff126880:0xff0e7899):stop?(pressed?0xff3b4755:0xff202d3b):(pressed?0xff263e52:0xff19293a);int stroke=primary?0xff35b8d3:stop?0xff465b6d:0xff344c60;GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(14));d.setStroke(dp(1),stroke);return d;}
- void button(LinearLayout root, final String label, final Runnable action) {
+ Button button(LinearLayout root, final String label, final Runnable action) {
   Button button = new Button(this);
   button.setText(label);
   button.setAllCaps(false);
@@ -732,6 +813,7 @@ public class MainActivity extends Activity {
   button.setPadding(dp(6), 0, dp(6), 0);
   button.setOnClickListener(new View.OnClickListener() {
    public void onClick(View view) {
+    if (videoCalibration.isActive() && !"停止".equals(label)) return;
     if ("停止".equals(label) || "连接".equals(label)) {
      action.run();
      return;
@@ -740,7 +822,7 @@ public class MainActivity extends Activity {
      showOperation("正在处理上一项操作，请稍候");
      return;
     }
-    if (connecting && !(videoReady && "提交日志".equals(label))) {
+    if (connecting && !(videoReady && ("提交日志".equals(label) || FRAME_RATE_ACTION.equals(label)))) {
      showOperation("请先停止连接再操作");
      return;
     }
@@ -756,10 +838,11 @@ public class MainActivity extends Activity {
    root.addView(actionRow, row);
   }
   LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(0, dp(50), 1);
-  if (firstInRow && !"提交日志".equals(label)) layout.rightMargin = dp(5);
+  if (firstInRow && !FRAME_RATE_ACTION.equals(label)) layout.rightMargin = dp(5);
   if (!firstInRow) layout.leftMargin = dp(5);
   actionRow.addView(button, layout);
   actionCount++;
+  return button;
  }
  private void requestUsbBluetoothPermission(final UsbManager manager,final UsbDevice device){
   if(manager==null||device==null)return;
@@ -963,15 +1046,19 @@ public class MainActivity extends Activity {
   UsbDevice current=manager.getDeviceList().get(expected.getDeviceName());
   return sameUsbDevice(expected,current)?current:null;
  }
- void stopConnection(){cancelUsbBtPeerChoice();stopConnectionCore();}
- void stopConnectionCore(){
+ void stopConnection(){
+  if(videoCalibration.isActive()){videoCalibration.cancel();return;}
+  cancelUsbBtPeerChoice();stopConnectionCore(true);
+ }
+ void stopConnectionForCalibration(){cancelUsbBtPeerChoice();stopConnectionCore(false);}
+ private void stopConnectionCore(boolean userRequested){
   wifiSetupRequest++;
   clearHotspotRecovery();
   recordAutoConnectDecision("queue_cancelled","user_stop",null,0);
   if(runtimeReconnectPreviousId!=null)recordRuntimeReconnect("retry_cancelled","user_stop");
   resetPermissionConnectionRequest();
   clearBootAutoConnection();
-  getSharedPreferences(BootAutoStartReceiver.PREFS,MODE_PRIVATE).edit()
+  if(userRequested)getSharedPreferences(BootAutoStartReceiver.PREFS,MODE_PRIVATE).edit()
       .putBoolean(USB_ATTACH_STOPPED_KEY,true).remove(USB_ATTACH_TOKEN_KEY).apply();
   authorizedUsbBtDevice=null;
   if(permissionPending)pendingUsbBtOperation=UsbBtPermissionOperation.CANCELLED;
@@ -1009,7 +1096,10 @@ public class MainActivity extends Activity {
  void showOperation(String s){if(!closed&&operationStatus!=null){operationStatus.setText(s);operationStatus.setVisibility(View.VISIBLE);}}
  void show(String s){if(closed||s==null)return;if(connecting){status.setText("\u6b63\u5728\u8fde\u63a5 iPhone");if(connectionProgress!=null)connectionProgress.setStage(uiStage,s);}else status.setText(s);}
  void setConnectionStage(String stage,String message){if(stage!=null&&!stage.isEmpty())uiStage=stage;if("CONNECT_START".equals(uiStage))probeAddress=null;else if("PHONE_START".equals(uiStage)){probeAddress=null;if(message!=null&&message.startsWith("PHONE_PROBE http://")){String candidate=message.substring("PHONE_PROBE ".length()).trim();if(candidate.length()<=96&&candidate.endsWith(":7001")&&candidate.indexOf(' ')<0)probeAddress=candidate;}}else if("VIDEO_READY".equals(uiStage)||"FAILED".equals(uiStage)||"DISCONNECTED".equals(uiStage)||"STOPPED".equals(uiStage))probeAddress=null;if(connectionProgress!=null)connectionProgress.setStage(uiStage,message);if(status!=null)status.setText("VIDEO_READY".equals(uiStage)?"CarPlay \u5df2\u8fde\u63a5":"\u6b63\u5728\u8fde\u63a5 iPhone");if(connecting&&operationStatus!=null&&probeAddress!=null){operationStatus.setText("\u7f51\u7edc\u8bca\u65ad\uff08\u53ef\u9009\uff09\uff1a"+probeAddress+"\uff08\u6295\u5c4f\u5361\u4f4f\u65f6\u518d\u7528 iPhone Safari \u6253\u5f00\uff09");operationStatus.setVisibility(View.VISIBLE);}}
- void refreshVideoBlank(){if(videoBlank!=null)videoBlank.setVisibility(connecting&&videoReady?View.GONE:View.VISIBLE);}
+ void refreshVideoBlank(){
+  if(videoBlank!=null)videoBlank.setVisibility(connecting&&videoReady?View.GONE:View.VISIBLE);
+  if(projectionTouch!=null)projectionTouch.setEnabled(resumed&&projectionMode&&connecting&&videoReady&&isProjectionSurfaceReady());
+ }
  void setProjectionMode(boolean enabled){
   projectionMode=enabled;
   refreshVideoBlank();
@@ -1027,7 +1117,14 @@ public class MainActivity extends Activity {
   ProjectionSurface(Context c){super(c);}
   protected void onMeasure(int widthSpec,int heightSpec){int w=View.MeasureSpec.getSize(widthSpec),h=View.MeasureSpec.getSize(heightSpec);int width=Math.min(w,h*ProjectionConfig.WIDTH/ProjectionConfig.HEIGHT);setMeasuredDimension(width,width*ProjectionConfig.HEIGHT/ProjectionConfig.WIDTH);}
  }
- static void record(Context c,String name,JSONObject details)throws Exception{DiagnosticLog.record(c,name,details);}
+ static void record(Context c,String name,JSONObject details)throws Exception{
+  if("WHEEL_KEY".equals(name)&&details.has("keyCode")){
+   int code=details.optInt("keyCode",-1);
+   if(!isWheelDiagnosticKey(code)&&!(isLegacyVendorKeyCode(code)&&
+    "vendor_nontext".equals(details.optString("keyCandidate"))))return;
+  }
+  DiagnosticLog.record(c,name,details);
+ }
 
  private void requestManualConnection(){
   if(connecting||runtimeReconnectPreviousId!=null){setProjectionMode(true);return;}
@@ -1129,15 +1226,44 @@ public class MainActivity extends Activity {
   setIntent(i);
   boolean bootAuthorized=consumeBootLaunch(i);
   boolean autoLaunch=bootAuthorized||consumeUsbAttachLaunch(i);
-  if(autoLaunch&&!connecting&&!connectPending)armBootAutoConnection(SystemClock.elapsedRealtime());
+  if(autoLaunch&&!connecting&&!connectPending&&!videoCalibration.isActive())armBootAutoConnection(SystemClock.elapsedRealtime());
   recordBootLaunch(bootAuthorized,autoLaunch);
   if(autoLaunch&&uiBuilt&&resumed)scheduleConnection(0);
  }
- protected void onResume(){super.onResume();resumed=true;if(uiBuilt){restoreConnection();refreshVideoBlank();lifecycle("resume");}else recordStartup("activity_resumed_before_content");if(connectPending)scheduleConnection(0);continueHotspotRecovery();}
- @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused)continueHotspotRecovery();}
- protected void onPause(){resumed=false;if(hotspotSettingsReturnPurpose!=null)leftForHotspotSettings=true;if(hotspotPrompt!=null)hotspotPrompt.dismiss();if(connectPending&&!connecting)recordBootWait("activity_background");cancelUsbBtPeerChoice();if(uiBuilt){lifecycle("pause");if(preview!=null)WiredService.detachSurface(this);}uiHandler.removeCallbacks(tryConnection);super.onPause();}
+ protected void onResume(){super.onResume();resumed=true;if(uiBuilt){restoreConnection();refreshVideoBlank();lifecycle("resume");}else recordStartup("activity_resumed_before_content");if(connectPending)scheduleConnection(0);if(videoCalibration.isActive())videoCalibration.onResume();else continueHotspotRecovery();}
+ @Override public void onWindowFocusChanged(boolean focused){
+  super.onWindowFocusChanged(focused);
+  if(focused&&!videoCalibration.isActive())continueHotspotRecovery();
+  if(closed)return;
+  try{
+   final JSONObject details=new JSONObject().put("keyPath","activity_dispatch")
+    .put("keyDecision",focused?"observer_focused":"observer_unfocused")
+    .put("keyWindowFocused",focused).put("projectionReady",WiredService.isVideoReady())
+    .put("connection",WiredService.currentConnectionId()).put("uptimeMs",SystemClock.elapsedRealtime());
+   worker.execute(new Runnable(){public void run(){
+    try{record(MainActivity.this,"WHEEL_KEY",details);}catch(Exception ignored){}
+   }});
+  }catch(Exception ignored){}
+ }
+ protected void onPause(){resumed=false;if(vehicleCapabilityCheck!=null)vehicleCapabilityCheck.dismiss();if(projectionTouch!=null)projectionTouch.setEnabled(false);videoCalibration.onPause();if(hotspotSettingsReturnPurpose!=null)leftForHotspotSettings=true;if(hotspotPrompt!=null)hotspotPrompt.dismiss();if(connectPending&&!connecting)recordBootWait("activity_background");cancelUsbBtPeerChoice();if(uiBuilt){lifecycle("pause");if(preview!=null)WiredService.detachSurface(this);}uiHandler.removeCallbacks(tryConnection);super.onPause();}
  protected void onStop(){cancelUsbBtPeerChoice();if(uiBuilt)lifecycle("background");super.onStop();}
  public static boolean wheelProbeActive(){return false;}
+ static boolean isWheelDiagnosticKey(int code){
+  return code==KeyEvent.KEYCODE_VOLUME_UP||code==KeyEvent.KEYCODE_VOLUME_DOWN||
+   code==KeyEvent.KEYCODE_VOLUME_MUTE||code==KeyEvent.KEYCODE_MUTE||
+   code==KeyEvent.KEYCODE_CALL||code==KeyEvent.KEYCODE_ENDCALL||
+   code==KeyEvent.KEYCODE_MEDIA_STOP||code==KeyEvent.KEYCODE_MEDIA_FAST_FORWARD||
+   code==KeyEvent.KEYCODE_MEDIA_REWIND||code==KeyEvent.KEYCODE_MEDIA_RECORD||
+   CarPlayMediaButton.INSTANCE.forKeyCode(code,true)!=null||
+   CarPlayMediaButton.INSTANCE.opensSiri(code)||CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code);
+ }
+ static boolean isLegacyVendorKeyCode(int code){return Build.VERSION.SDK_INT==17&&code>=300&&code<=511;}
+ private boolean isProjectedVendorKey(KeyEvent event){
+  return isLegacyVendorKeyCode(event.getKeyCode())&&projectionMode&&hasWindowFocus()&&
+   WiredService.isVideoReady()&&event.getScanCode()>0&&
+   (event.getFlags()&(KeyEvent.FLAG_SOFT_KEYBOARD|KeyEvent.FLAG_VIRTUAL_HARD_KEY))==0&&
+   !event.isPrintingKey()&&event.getUnicodeChar()==0;
+ }
  public boolean dispatchKeyEvent(KeyEvent event){
   int code=event.getKeyCode();boolean handled=false;String decision="pass_through";
   if(WiredService.consumeWheelDuplicate(code)){handled=true;decision="duplicate_suppressed";}
@@ -1148,9 +1274,20 @@ public class MainActivity extends Activity {
    handled=WiredService.sendWheelKey(code,"activity_dispatch");decision=handled?"wheel_accepted":"wheel_unmapped_or_unavailable";
   }else if(event.getAction()==KeyEvent.ACTION_DOWN)decision="key_down_observed";
   boolean delivered=handled||super.dispatchKeyEvent(event);
-  if(event.getAction()==KeyEvent.ACTION_DOWN||event.getAction()==KeyEvent.ACTION_UP&&event.getRepeatCount()<=1){
-   boolean known=code==KeyEvent.KEYCODE_VOLUME_UP||code==KeyEvent.KEYCODE_VOLUME_DOWN||code==KeyEvent.KEYCODE_MEDIA_NEXT||code==KeyEvent.KEYCODE_MEDIA_PREVIOUS||code==KeyEvent.KEYCODE_HEADSETHOOK||code==KeyEvent.KEYCODE_CALL||code==KeyEvent.KEYCODE_ENDCALL||CarPlayMediaButton.INSTANCE.opensSiri(code)||CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code);
-   if(WiredService.isVideoReady()||known)try{record(this,"WHEEL_KEY",new JSONObject().put("keyPath","activity_dispatch").put("keyCode",code).put("keyAction",event.getAction()).put("keyRepeatCount",event.getRepeatCount()).put("keySource",event.getSource()).put("keyFlags",event.getFlags()).put("keyDecision",decision).put("keyHandled",delivered).put("keyIsSiriCandidate",CarPlayMediaButton.INSTANCE.opensSiri(code)||CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code)));}catch(Exception ignored){}
+  if(event.getRepeatCount()<=1&&
+   (event.getAction()==KeyEvent.ACTION_DOWN||event.getAction()==KeyEvent.ACTION_UP)){
+   boolean known=isWheelDiagnosticKey(code);
+   try{
+    if(known||isProjectedVendorKey(event))record(this,"WHEEL_KEY",new JSONObject()
+     .put("keyPath","activity_dispatch").put("keyCandidate",known?"known_control":"vendor_nontext")
+     .put("keyCode",code).put("keyScanCode",event.getScanCode()).put("keyAction",event.getAction())
+     .put("keyRepeatCount",event.getRepeatCount()).put("keySource",event.getSource()).put("keyFlags",event.getFlags())
+     .put("keyDecision",decision).put("keyHandled",delivered).put("keyConsumedByDiPlay",handled)
+     .put("keyWindowFocused",hasWindowFocus()).put("projectionReady",WiredService.isVideoReady())
+     .put("connection",WiredService.currentConnectionId())
+     .put("keyIsSiriCandidate",CarPlayMediaButton.INSTANCE.opensSiri(code)||
+      CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code)));
+   }catch(Exception ignored){}
   }
   return delivered;
  }
@@ -1228,7 +1365,8 @@ public class MainActivity extends Activity {
        requestStartedAt=0;vpnWaitMs=0;
       }}).show();
  }
- void connectPort(UsbDevice usbBtDevice){
+ void connectPort(UsbDevice usbBtDevice){connectPort(usbBtDevice,0);}
+ void connectPort(UsbDevice usbBtDevice,int benchmarkFps){
   if(connecting){showOperation("正在连接，请先停止后重试");return;}
   boolean runtimeReconnect=runtimeReconnectPreviousId!=null;
   if(!resumed||!uiBuilt){
@@ -1252,10 +1390,12 @@ public class MainActivity extends Activity {
   showOperation(p2p ? "正在准备 Wi-Fi Direct 和蓝牙连接…" : "正在准备车载热点和蓝牙连接…");
   try{record(this,"NETWORK_BACKEND_SELECTED",new JSONObject().put("backend",p2p?"android_wifi_p2p_go":"android_wifi_softap").put("transportMode",p2p?"usb_bt_p2p_data":"usb_bt_softap_data").put("vpnRequired",false).put("ipv4",true).put("tcp",true).put("udp",true).put("uptimeMs",SystemClock.elapsedRealtime()));}catch(Exception ignored){}
   try{
-   startService(new Intent(this,WiredService.class).putExtra("connection_id",connectionId)
+   Intent launch=new Intent(this,WiredService.class).putExtra("connection_id",connectionId)
        .putExtra("request_started_at",requestStartedAt).putExtra("usb_bt_device",usbBtDevice)
         .putExtra(EXTRA_RESELECT_PHONE,reselectPhone).putExtra("boot_auto_connect",autoConnectArmed)
-        .putExtra("runtime_reconnect",runtimeReconnect));
+        .putExtra("runtime_reconnect",runtimeReconnect);
+   if(benchmarkFps>0)launch.putExtra(WiredService.EXTRA_BENCHMARK_FPS,benchmarkFps);
+   startService(launch);
    if(runtimeReconnect)recordRuntimeReconnect("service_launch","same_authorized_adapter");
    recordAutoConnectDecision("service_launch","usb_ready",null,0);
    resetBootWaitEvidence();
@@ -1311,6 +1451,8 @@ public class MainActivity extends Activity {
   connecting=false;
   videoReady=false;
 
+  if(videoCalibration.connectionEnded(id))return;
+
   if(retry){
    setProjectionMode(false);
    autoConnectRetryUsed=true;
@@ -1355,10 +1497,10 @@ public class MainActivity extends Activity {
   }
  }
 
- public void onBackPressed(){if(projectionMode){setProjectionMode(false);return;}if(connecting||runtimeReconnectPreviousId!=null){setProjectionMode(true);return;}super.onBackPressed();}
+ public void onBackPressed(){if(videoCalibration.isActive()){videoCalibration.cancel();return;}if(projectionMode){setProjectionMode(false);return;}if(connecting||runtimeReconnectPreviousId!=null){setProjectionMode(true);return;}super.onBackPressed();}
  protected void onActivityResult(int r,int code,Intent data){super.onActivityResult(r,code,data);}
  static JSONArray snapshot(Context c)throws Exception{return DiagnosticLog.snapshot(c);}
  static void acknowledge(Context c,JSONArray rows)throws Exception{DiagnosticLog.acknowledge(c,rows);}
  String asset(String name)throws Exception{BufferedReader r=new BufferedReader(new InputStreamReader(getAssets().open(name),"UTF-8"));try{return r.readLine().trim();}finally{r.close();}}
-  public void onDestroy(){if(connectPending&&!connecting)recordAutoConnectDecision("queue_cancelled","activity_destroyed",null,0);closed=true;clearRuntimeReconnect();clearHotspotRecovery();OnlineUpdate.cancel(this);cancelUsbBtPeerChoice();startupBuilding=false;connectPending=false;connectPendingSince=0;uiHandler.removeCallbacksAndMessages(null);if(preview!=null)WiredService.detachSurface(this);if(active==this)active=null;if(portReceiverRegistered)try{unregisterReceiver(portStatus);}catch(Exception ignored){}clearUsbBluetoothPermission();authorizedUsbBtDevice=null;worker.shutdown();super.onDestroy();}
+  public void onDestroy(){if(connectPending&&!connecting)recordAutoConnectDecision("queue_cancelled","activity_destroyed",null,0);closed=true;videoCalibration.destroy();if(frameRateDialog!=null)frameRateDialog.dismiss();clearRuntimeReconnect();clearHotspotRecovery();OnlineUpdate.cancel(this);cancelUsbBtPeerChoice();startupBuilding=false;connectPending=false;connectPendingSince=0;uiHandler.removeCallbacksAndMessages(null);if(preview!=null)WiredService.detachSurface(this);if(active==this)active=null;if(portReceiverRegistered)try{unregisterReceiver(portStatus);}catch(Exception ignored){}clearUsbBluetoothPermission();authorizedUsbBtDevice=null;worker.shutdown();super.onDestroy();}
 }

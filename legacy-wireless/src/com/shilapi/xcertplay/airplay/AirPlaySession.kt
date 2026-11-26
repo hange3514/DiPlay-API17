@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.airplay
 
+import android.os.SystemClock
 import android.util.Log
 import com.shilapi.xcertplay.compat.Base64Compat
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
@@ -167,6 +168,79 @@ class AirPlaySession(
     private var keepAliveThread: Thread? = null
     private val eventWriteLock = Any()
     private val eventThreads = CopyOnWriteArrayList<Thread>()
+    @Volatile private var siriSetupEvidence = SiriSetupEvidence()
+    private val siriRuntimeEvidence = SiriSessionRuntimeEvidence()
+
+    private data class SiriSetupEvidence(
+        val endpointSetups: Int = 0,
+        val verifiedEndpointSetups: Int = 0,
+        val featureLists: Int = 0,
+        val enhancedSiriTokenSeen: Boolean = false,
+        val enhancedSiriInReply: Boolean = false,
+        val type100: Int = 0,
+        val type101: Int = 0,
+        val type102: Int = 0,
+        val type103: Int = 0,
+        val speechRecognition: Int = 0,
+        val mainMicRequested: Int = 0,
+        val explicitOtherInput: Int = 0,
+        val auxInLabelSeen: Boolean = false,
+        val auxOutLabelSeen: Boolean = false,
+    )
+
+    /** Observed SETUP metadata only. Missing tokens do not establish peer support or entitlement. */
+    internal fun siriCapabilitySummary(): String = siriSetupEvidence.run {
+        "endpointSetups=$endpointSetups verifiedEndpointSetups=$verifiedEndpointSetups featureLists=$featureLists " +
+            "enhancedSiriTokenSeen=$enhancedSiriTokenSeen enhancedSiriInReply=$enhancedSiriInReply audio100=$type100 audio101=$type101 " +
+            "audio102=$type102 audio103=$type103 speechRecognition=$speechRecognition " +
+            "mainMicRequested=$mainMicRequested explicitOtherInput=$explicitOtherInput " +
+            "auxInLabelSeen=$auxInLabelSeen auxOutLabelSeen=$auxOutLabelSeen ${siriRuntimeEvidence.summary()}"
+    }
+
+    private fun recordSiriSetupFeatures(proposed: List<*>?, enabled: List<String>) {
+        val previous = siriSetupEvidence
+        siriSetupEvidence = previous.copy(
+            endpointSetups = setupEvidenceCount(previous.endpointSetups),
+            verifiedEndpointSetups = setupEvidenceCount(previous.verifiedEndpointSetups, pairVerify.isVerified),
+            featureLists = setupEvidenceCount(previous.featureLists, proposed != null),
+            enhancedSiriTokenSeen = previous.enhancedSiriTokenSeen || proposed.orEmpty().asSequence().take(64).any {
+                (it as? String)?.equals("enhancedSiri", ignoreCase = true) == true
+            },
+            enhancedSiriInReply = previous.enhancedSiriInReply || "enhancedSiri" in enabled,
+        )
+    }
+
+    private fun recordSiriStreamSetup(type: Int, stream: Map<String, Any?>) {
+        val audioLabel = stream["audioType"] as? String
+        val speech = audioLabel?.equals("speechRecognition", ignoreCase = true) == true
+        // A literal label is evidence, but numeric stream types are not guessed to be Aux In/Out.
+        val auxIn = audioLabel?.equals("auxIn", ignoreCase = true) == true
+        val auxOut = audioLabel?.equals("auxOut", ignoreCase = true) == true
+        val explicitInput = when (val input = stream["input"]) {
+            is Boolean -> input
+            is Number -> input.toLong() != 0L
+            else -> false
+        }
+        val mainMic = type == STREAM_TYPE_MAIN_AUDIO && (long(stream["dataPort"]) ?: 0L) in 1L..65535L &&
+            local.headunit.diplay.AppMicrophoneRequestPolicy.wantsMicrophone(audioLabel?.lowercase() ?: "default", stream)
+        val otherInput = type != STREAM_TYPE_MAIN_AUDIO && explicitInput
+        if (type !in STREAM_TYPE_MAIN_AUDIO..STREAM_TYPE_MAIN_BUFFERED_AUDIO && !speech && !auxIn && !auxOut && !otherInput) return
+        val previous = siriSetupEvidence
+        siriSetupEvidence = previous.copy(
+            type100 = setupEvidenceCount(previous.type100, type == STREAM_TYPE_MAIN_AUDIO),
+            type101 = setupEvidenceCount(previous.type101, type == STREAM_TYPE_ALT_AUDIO),
+            type102 = setupEvidenceCount(previous.type102, type == STREAM_TYPE_MAIN_HIGH_AUDIO),
+            type103 = setupEvidenceCount(previous.type103, type == STREAM_TYPE_MAIN_BUFFERED_AUDIO),
+            speechRecognition = setupEvidenceCount(previous.speechRecognition, speech),
+            mainMicRequested = setupEvidenceCount(previous.mainMicRequested, mainMic),
+            explicitOtherInput = setupEvidenceCount(previous.explicitOtherInput, otherInput),
+            auxInLabelSeen = previous.auxInLabelSeen || auxIn,
+            auxOutLabelSeen = previous.auxOutLabelSeen || auxOut,
+        )
+    }
+
+    private fun setupEvidenceCount(count: Int, seen: Boolean = true): Int =
+        if (seen && count < 255) count + 1 else count
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
     val localAddress: InetAddress? = socket.localAddress
@@ -222,12 +296,12 @@ class AirPlaySession(
         return true
     }
 
-    @Volatile internal var hasRenderedVideo = false
-        private set
+    private val firstVideoAtMs = AtomicLong(-1L)
+    internal val firstVideoSubmittedAtMs: Long get() = firstVideoAtMs.get()
+    internal val hasRenderedVideo: Boolean get() = firstVideoSubmittedAtMs >= 0L
 
     internal fun videoFrameRendered() {
-        if (!closed.get()) {
-            hasRenderedVideo = true
+        if (!closed.get() && firstVideoAtMs.compareAndSet(-1L, SystemClock.elapsedRealtime())) {
             reportStartup(StartupStage.FIRST_FRAME_RENDERED)
             listener.onVideoFrameRendered(this)
         }
@@ -498,9 +572,10 @@ class AirPlaySession(
         !closed.get() && eventSocket?.isClosed == false && eventCipher != null
 
     fun invokeSiri(): Boolean = synchronized(eventWriteLock) {
+        siriRuntimeEvidence.beginButton(eventCseq + 1)
         val pressed = sendCommandLocked(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 2)))
         val released = sendCommandLocked(linkedMapOf("type" to "requestSiri", "params" to linkedMapOf("siriAction" to 3)))
-        pressed && released
+        (pressed && released).also(siriRuntimeEvidence::finishButtonWrite)
     }
 
     fun sendIapMessage(data: ByteArray, timeoutMillis: Long = 0L): Boolean {
@@ -538,18 +613,28 @@ class AirPlaySession(
         }
     }
 
-    fun setNightMode(night: Boolean): Boolean = synchronized(eventWriteLock) {
-        pendingNightMode = night
-        sendPendingNightModeLocked()
+    fun setNightMode(night: Boolean): Boolean {
+        val written = synchronized(eventWriteLock) {
+            pendingNightMode = night
+            sendPendingNightModeLocked()
+        }
+        written?.let(::recordNightModeWritten)
+        return written != null
     }
 
-    private fun sendPendingNightModeLocked(): Boolean {
-        val night = pendingNightMode ?: return true
+    private fun sendPendingNightModeLocked(): Boolean? {
+        val night = pendingNightMode ?: return null
         val sent = sendCommandLocked(
             linkedMapOf("type" to "setNightMode", "params" to linkedMapOf("nightMode" to night)),
         )
-        if (sent) pendingNightMode = null
-        return sent
+        if (!sent) return null
+        pendingNightMode = null
+        return night
+    }
+
+    private fun recordNightModeWritten(night: Boolean) {
+        val state = if (night) "night" else "day"
+        debugLog("airplay vehicle night_mode_written state=$state")
     }
 
     private fun sendHidReport(uid: Int, report: ByteArray): Boolean =
@@ -874,7 +959,9 @@ class AirPlaySession(
             endpoints
         }
         reportStartup(StartupStage.SETUP_ENDPOINTS_READY)
-        val features = setupEnabledFeatures(config, dict["features"] as? List<*>)
+        val proposedFeatures = dict["features"] as? List<*>
+        val features = setupEnabledFeatures(config, proposedFeatures)
+        recordSiriSetupFeatures(proposedFeatures, features)
         val videoPlaybackEnabled = VideoInCar.FEATURE in features
         val videoDelivery = videoPlaybackAvailability.setFeatureEnabled(videoPlaybackEnabled)
         debugLog("airplay video playback negotiated=$videoPlaybackEnabled availability=$videoDelivery")
@@ -892,6 +979,7 @@ class AirPlaySession(
         for (entry in streams) {
             val stream = asMap(entry) ?: continue
             val type = long(stream["type"])?.toInt() ?: continue
+            recordSiriStreamSetup(type, stream)
             debugLog("airplay SETUP stream type=$type payload=$stream")
             when (type) {
                 STREAM_TYPE_MAIN_SCREEN, STREAM_TYPE_ALT_SCREEN -> {
@@ -1022,7 +1110,10 @@ class AirPlaySession(
         val type = string(body["type"])
         val params = asMap(body["params"]) ?: emptyMap()
         debugLog("airplay command type=$type keys=${params.keys.sorted()}")
-        if(type=="modesChanged")debugLog("audio_modes "+local.headunit.diplay.AudioModeEvidence.describe(params))
+        if (type == "modesChanged") {
+            siriRuntimeEvidence.observeSpeech(params)
+            debugLog("audio_modes " + local.headunit.diplay.AudioModeEvidence.describe(params))
+        }
         val streamId = request.headers["x-apple-streamid"]?.toLongOrNull()
         val data = params["data"] as? ByteArray
         if (streamId != null && data != null) {
@@ -1163,9 +1254,10 @@ class AirPlaySession(
                 }
             }
             if (!installed) return
-            synchronized(eventWriteLock) {
+            val writtenNight = synchronized(eventWriteLock) {
                 sendPendingNightModeLocked()
             }
+            writtenNight?.let(::recordNightModeWritten)
             val videoDelivery = videoPlaybackAvailability.setEventReady(true)
             debugLog("airplay video event ready availability=$videoDelivery")
             reapplyClusterContent()
@@ -1207,7 +1299,12 @@ class AirPlaySession(
                 plaintext = parsed.rest
                 if (parsed.messages.isNotEmpty()) lastEventTrafficNs = System.nanoTime()
                 for (message in parsed.messages) {
-                    if (message.method.startsWith("RTSP/") || message.method.startsWith("HTTP/")) continue
+                    if (message.method.startsWith("RTSP/") || message.method.startsWith("HTTP/")) {
+                        val cseq = message.headers["cseq"]?.toIntOrNull()
+                        val status = message.path.toIntOrNull()
+                        if (cseq != null && status != null) siriRuntimeEvidence.observeReply(cseq, status)
+                        continue
+                    }
                     debugLog(
                         "airplay event rx ${message.method} ${message.path} cseq=${message.headers["cseq"] ?: "-"} body=${message.body.size}",
                     )

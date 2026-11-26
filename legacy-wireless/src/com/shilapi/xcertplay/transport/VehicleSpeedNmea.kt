@@ -2,7 +2,7 @@ package com.shilapi.xcertplay.transport
 
 import java.util.Locale
 
-enum class VehicleGear(val letter: Char) { PARK('P'), REVERSE('R'), NEUTRAL('N'), DRIVE('D') }
+enum class VehicleGear(val letter: Char) { PARK('P'), REVERSE('R'), NEUTRAL('N'), DRIVE('D'), UNKNOWN('U') }
 
 /** One wheel-speed reading; [elapsedMillis] is on the monotonic clock since boot. */
 data class VehicleSpeedSample(val elapsedMillis: Long, val metersPerSecond: Double)

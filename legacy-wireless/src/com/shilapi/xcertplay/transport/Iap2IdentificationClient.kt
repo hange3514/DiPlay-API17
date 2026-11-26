@@ -64,6 +64,8 @@ data class Iap2IdentificationConfig(
     val wirelessCarPlaySsid: String? = null,
     /** Runtime type-130 iAP2 is carried by AirPlay/Wi-Fi and must not claim the USB host component. */
     val usbHostTransportComponentEnabled: Boolean = true,
+    /** GNSS sentences may be unavailable even when the vehicle speed source is available. */
+    val gnssPositionEnabled: Boolean = true,
 ) {
     constructor(
         name: String,
@@ -392,8 +394,10 @@ class Iap2IdentificationClient(private val session: Iap2Session) {
                     group(22) {
                         u16(0, 0)
                         string(1, config.name)
-                        void(17)
-                        void(18)
+                        if (config.gnssPositionEnabled) {
+                            void(17)
+                            void(18)
+                        }
                         if (config.vehicleSpeedEnabled) void(20)
                     }
                 }

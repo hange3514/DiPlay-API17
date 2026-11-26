@@ -19,6 +19,7 @@ import java.net.*
 import java.util.*
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicIntegerArray
 import org.json.*
 
 /** API17 hybrid lifecycle: USB bootstrap and Wi-Fi AirPlay data; no BYD vehicle writes. */
@@ -26,6 +27,7 @@ class WiredService:Service() {
  override fun onBind(intent:Intent?):IBinder?=null
  private fun registerDetachReceiver(){if(detachReceiver!=null)return;val receiver=object:BroadcastReceiver(){override fun onReceive(context:Context?,intent:Intent?){if(intent?.action!=UsbManager.ACTION_USB_DEVICE_DETACHED)return;val device=intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)?:return;val active=usbBtDevice;val isActiveDongle=active!=null&&active.deviceId==device.deviceId&&active.vendorId==device.vendorId&&active.productId==device.productId;if(!isActiveDongle)return;usbLinked=false;log("HYBRID_USB_DETACHED","stage=android_usb_broadcast role=usb_bluetooth vendor=${device.vendorId} product=${device.productId} activeSessions=${sessions.size} videoReady=$videoReady");try{MainActivity.record(this@WiredService,"HYBRID_USB_DETACHED",JSONObject().put("usbDetached",true).put("role","usb_bluetooth").put("activeSession",session!=null).put("videoReady",videoReady).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Throwable){};shutdown()}};registerReceiver(receiver,IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED));detachReceiver=receiver;own(Closeable{try{unregisterReceiver(receiver)}catch(_:Throwable){};detachReceiver=null},"usb_detach_receiver")}
  companion object {
+  const val EXTRA_BENCHMARK_FPS="benchmark_fps"
   private const val AIRPLAY_CONTROL_PORT=7000
   private const val FIRST_FRAME_WAIT_MS=25000L
   private const val AIRPLAY_NEGOTIATION_TIMEOUT_MS=20000
@@ -34,6 +36,15 @@ class WiredService:Service() {
   private const val HOTSPOT_REOPEN_LIMIT_MS=6500L
   private const val HOTSPOT_SESSION_PROOF_MS=750L
   private const val HOTSPOT_REOPEN_COOLDOWN_MS=15000L
+  private val mx9a0AvcDecoder by lazy {
+   val name="OMX.Freescale.std.video_decoder.avc.v3.hw-based"
+   runCatching {
+    (0 until MediaCodecList.getCodecCount()).any { index ->
+     val codec=MediaCodecList.getCodecInfoAt(index)
+     !codec.isEncoder&&codec.name==name&&codec.supportedTypes.any{it.equals("video/avc",ignoreCase=true)}
+    }
+   }.getOrDefault(false).let{if(it)name else null}
+  }
   private val bufferedAacAvailable by lazy {
    runCatching {
     (0 until MediaCodecList.getCodecCount()).any { index ->
@@ -49,14 +60,32 @@ class WiredService:Service() {
   @Volatile private var touchSurfaceGeneration=0L
   @Volatile private var activeProbeUrl:String?=null
   private var surfaceOwner:Any?=null
-  @JvmStatic @Synchronized fun attachSurface(owner:Any,value:Surface){if(surfaceOwner===owner&&surface===value){live?.signalProjectionSurface();return};surfaceOwner=owner;surface=value;touchSurfaceGeneration++;live?.signalProjectionSurface();live?.sink?.setSurface(value);live?.sink?.routing?.foreground();live?.log("VIDEO_SURFACE","attached")}
-  @JvmStatic @Synchronized fun detachSurface(owner:Any){if(surfaceOwner!==owner)return;surfaceOwner=null;surface=null;touchSurfaceGeneration++;live?.cancelTouchOnDetach();live?.sink?.setSurface(null);live?.log("VIDEO_SURFACE","detached; USB session retained")}
+  @JvmStatic @Synchronized fun attachSurface(owner:Any,value:Surface){if(surfaceOwner===owner&&surface===value){live?.signalProjectionSurface();return};val previousGeneration=touchSurfaceGeneration++;if(surface!=null)live?.cancelTouchOnDetach(previousGeneration);surfaceOwner=owner;surface=value;live?.signalProjectionSurface();live?.sink?.setSurface(value);live?.sink?.routing?.foreground();live?.log("VIDEO_SURFACE","attached")}
+  @JvmStatic @Synchronized fun detachSurface(owner:Any){if(surfaceOwner!==owner)return;surfaceOwner=null;surface=null;val previousGeneration=touchSurfaceGeneration++;live?.cancelTouchOnDetach(previousGeneration);live?.sink?.setSurface(null);live?.log("VIDEO_SURFACE","detached; USB session retained")}
   @JvmStatic fun currentConnectionId():String=live?.let{if(!it.closed&&!it.failed.get())it.connectionId else ""}.orEmpty()
   @JvmStatic fun currentProbeUrl():String?=activeProbeUrl
   @JvmStatic fun currentProgressStage():String=live?.progressStage?:"CONNECT_START"
   @JvmStatic fun currentProgressMessage():String=live?.progressMessage.orEmpty()
   @JvmStatic fun renderedVideoFrames():Long=live?.sink?.renderedVideoFrames?:0L
   @JvmStatic fun currentFps():Int=live?.selectedFps?:0
+  @JvmStatic fun routeMetadataCounts():IntArray {
+   val owner=live?.takeUnless{it.closed}?:return IntArray(2)
+   return IntArray(2){owner.routeMetadata.get(it)}
+  }
+  @JvmStatic fun siriDiagnosticSummary():String=
+   live?.takeUnless{it.closed}?.session?.siriCapabilitySummary()?:"siriSession=absent"
+   @JvmStatic fun vehicleDiagnosticSummary():String {
+    val signals=live?.takeUnless{it.closed}?.vehicleSignals?.snapshot()?:return "vehicleSession=absent"
+    val brake=signals.parkingBrake?.let{if(it)"engaged" else "released"}?:"unknown"
+    val lights=signals.night?.let{if(it)"night" else "day"}?:"unknown"
+    val motion=when{signals.speedKph.isNaN()->"unknown";signals.speedKph==0.0->"stationary";else->"moving"}
+    val steering=signals.steeringRaw?.toString()?:"unknown"
+    return "vehicleSession=present parkingBrake=$brake motion=$motion oemTheme=$lights speedSource=${signals.speedSource} speedSelector=${signals.speedSelector} steeringRaw=$steering steeringSwingRaw=${signals.steeringSwingRaw}"
+   }
+  @JvmStatic fun currentUsbBluetoothDevice():UsbDevice?=live?.takeUnless{it.closed}?.usbBtDevice
+  @JvmStatic fun beginVideoCalibration(id:String):Boolean=live?.startCalibration(id)==true
+  @JvmStatic fun finishVideoCalibration(id:String):VideoCalibration.Sample?=live?.finishCalibration(id)
+  @JvmStatic fun cancelVideoCalibration(id:String){live?.cancelCalibration(id)}
   @JvmStatic fun isVideoReady():Boolean=live?.videoReady==true
   @Volatile private var live:WiredService?=null
   // Main-thread request state. AudioManager has no registration result.
@@ -116,56 +145,87 @@ class WiredService:Service() {
    owner.log("WHEEL_KEY","volume direction=$direction stream=$stream")
    return true
   }
-  @JvmStatic fun touch(action:Int,x:Float,y:Float){
+  @JvmStatic fun touch(action:Int,contacts:List<AirPlayContact>,newPointerId:Int?,androidPointerCount:Int){
    val owner=live?:return
    val target=owner.session?:return
    if(owner.closed||!target.hasRenderedVideo||!target.canSendInput())return
-   val release=action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL
-   if(!release&&action!=MotionEvent.ACTION_DOWN&&action!=MotionEvent.ACTION_MOVE)return
-   if(!release&&surface?.isValid!=true)return
+   if(action!=MotionEvent.ACTION_CANCEL&&surface?.isValid!=true)return
    val surfaceGeneration=touchSurfaceGeneration
-   val at=SystemClock.elapsedRealtime()
-   val point=AirPlayContact(0,x.toDouble().coerceIn(0.0,1.0),y.toDouble().coerceIn(0.0,1.0),!release)
-   TouchDispatch.submit(owner.input,owner.touchQueue,action){
-    if(release)owner.releaseSentTouch(target,point.takeIf{surfaceGeneration==touchSurfaceGeneration})
-    else if(surfaceGeneration==touchSurfaceGeneration&&surface?.isValid==true&&
-        SystemClock.elapsedRealtime()-at<=WheelControl.MAX_INPUT_AGE_MS){
-     owner.sendTouchPress(target,action,point)
-    }
+   if(androidPointerCount>=2&&owner.androidMultiTouchSeen.compareAndSet(false,true)){
+    owner.recordTouchEvidence("android_two_contacts",action,androidPointerCount)
+   }
+   TouchDispatch.submit(owner.input,owner.touchQueue,action,
+    onOverflow={owner.cancelTouch(target,surfaceGeneration,"queue_overflow")}){
+    if(action==MotionEvent.ACTION_CANCEL)owner.cancelTouch(target,surfaceGeneration,"cancelled")
+    else if(surfaceGeneration==touchSurfaceGeneration&&surface?.isValid==true)
+     owner.sendTouchSnapshot(target,surfaceGeneration,action,contacts,newPointerId,androidPointerCount)
    }
   }
 
  }
  private val work=Executors.newSingleThreadExecutor()
  private val mainHandler=Handler(Looper.getMainLooper())
+  private var vehicleSignals:LegacyVehicleSignals?=null
+  private var lastVehicleNight:Boolean?=null // main-thread broadcast state
+  private val themeWorker=Executors.newSingleThreadExecutor{job->Thread(job,"legacy-vehicle-theme")}
+  private val themeQueued=AtomicBoolean(false)
+  private var themeSession:AirPlaySession?=null // theme worker only
+  private var themeValue:Boolean?=null
  private val touchQueue=LinkedBlockingDeque<Runnable>(16)
+ private val routeMetadata=AtomicIntegerArray(2)
  private val input=ThreadPoolExecutor(1,1,0,TimeUnit.MILLISECONDS,touchQueue)
  // Accessed exclusively by the input worker.
- private var pressedTouchSession:AirPlaySession?=null
- private var pressedTouch:AirPlayContact?=null
+ private var touchSession:AirPlaySession?=null
+ private val touchState=ProjectionTouchState()
+ private val androidMultiTouchSeen=AtomicBoolean(false)
+ private val loggedTouchEvidence=HashSet<String>() // input worker only
 
- private fun sendTouchPress(target:AirPlaySession,action:Int,point:AirPlayContact){
-  if(closed||session!==target||!target.canSendInput())return
-  if(action==MotionEvent.ACTION_MOVE&&pressedTouchSession!==target)return
-  if(runCatching{target.sendTouch(listOf(point))}.getOrDefault(false)){
-   pressedTouchSession=target
-   pressedTouch=point
+ private fun sendTouchSnapshot(target:AirPlaySession,generation:Long,action:Int,contacts:List<AirPlayContact>,newPointerId:Int?,androidPointerCount:Int){
+  if(!prepareTouchSession(target))return
+  val before=touchState.activeCount
+  val sent=touchState.dispatch(generation,action,contacts,newPointerId){
+   generation==touchSurfaceGeneration&&surface?.isValid==true&&writeTouchReport(target,it)
   }
+  val active=touchState.activeCount
+  val stage=when{
+   sent&&before<2&&active==2->"dual_report_written"
+   sent&&before==2&&active==1->"one_finger_released"
+   !sent&&action==MotionEvent.ACTION_POINTER_DOWN&&androidPointerCount>=2->"second_contact_not_written"
+   else->null
+  }
+  if(stage!=null&&loggedTouchEvidence.add(stage))recordTouchEvidence(stage,action,androidPointerCount,active)
  }
 
- private fun releaseSentTouch(target:AirPlaySession,finalPoint:AirPlayContact?=null){
-  if(pressedTouchSession!==target)return
-  val point=pressedTouch
-  pressedTouchSession=null
-  pressedTouch=null
-  if(point!=null&&!closed&&session===target&&target.canSendInput()){
-   runCatching{target.sendTouch(listOf(finalPoint?:point.copy(down=false)))}
+ private fun prepareTouchSession(target:AirPlaySession):Boolean{
+  if(closed||session!==target||!target.canSendInput())return false
+  if(touchSession!==target){
+   touchState.reset()
+   touchSession=target
   }
+  return true
  }
 
- private fun cancelTouchOnDetach(){
+ private fun writeTouchReport(target:AirPlaySession,contacts:List<AirPlayContact>):Boolean=
+  !closed&&session===target&&runCatching{target.sendTouch(contacts)}.getOrDefault(false)
+
+ private fun cancelTouch(target:AirPlaySession,generation:Long,stage:String){
+  if(touchSession!==target||!prepareTouchSession(target))return
+  val before=touchState.activeCount
+  val sent=touchState.cancel(generation){writeTouchReport(target,it)}
+  if((stage=="queue_overflow"||before==2&&sent)&&loggedTouchEvidence.add(stage))
+   recordTouchEvidence(stage,MotionEvent.ACTION_CANCEL,0,touchState.activeCount)
+ }
+
+ private fun cancelTouchOnDetach(generation:Long){
   val target=session?:return
-  TouchDispatch.submit(input,touchQueue,MotionEvent.ACTION_CANCEL){releaseSentTouch(target)}
+  val cancel={cancelTouch(target,generation,"surface_detached")}
+  TouchDispatch.submit(input,touchQueue,MotionEvent.ACTION_CANCEL,onOverflow=cancel,work=cancel)
+ }
+
+ private fun recordTouchEvidence(stage:String,action:Int,androidPointerCount:Int,activeContacts:Int=-1){
+  runCatching{MainActivity.record(this,"TOUCH_MULTITOUCH",JSONObject()
+   .put("stage",stage).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt)
+   .put("diagnosticSummary","stage=$stage action=$action androidPointers=$androidPointerCount activeContacts=$activeContacts"))}
  }
  @Volatile private var closed=false
  private var started=false
@@ -177,7 +237,8 @@ class WiredService:Service() {
  private val bornAt=SystemClock.elapsedRealtime()
  private val startup=ConnectionTimings(bornAt)
  private var requestStartedAt=bornAt
- private var selectedFps=15
+ private var selectedFps=PlaybackOptions.DEFAULT_FPS
+ private var benchmarkConnection=false
  private var usbProfile=0
  private var usbBatchId=""
  @Volatile private var detachReceiver:BroadcastReceiver?=null
@@ -219,12 +280,45 @@ class WiredService:Service() {
  private val resourceNames=IdentityHashMap<Closeable,String>()
  @Volatile private var userlandNetwork:UserlandNcmNetwork?=null
  @Volatile private var session:AirPlaySession?=null
+ private var calibrationSession:AirPlaySession?=null // protected by resourceLock
  private var sessionGeneration=0L // protected by resourceLock; invalidates an older grace timer
  private val sessions=CopyOnWriteArrayList<AirPlaySession>()
  @Volatile private var server:ServerSocket?=null
  @Volatile private var sink:LegacyMedia?=null
  @Volatile private var videoReady=false
  @Volatile private var lastFailure:String?=null
+ private fun startCalibration(id:String):Boolean=synchronized(resourceLock){
+  val current=session?:return@synchronized false
+  if(id.isEmpty()||connectionId!=id||closed||failed.get()||!videoReady||current.isClosed||
+   !current.hasRenderedVideo||surface?.isValid!=true||calibrationSession!=null)return@synchronized false
+  if(sink?.beginVideoCalibration(selectedFps)!=true)return@synchronized false
+  calibrationSession=current
+  true
+ }
+ private fun finishCalibration(id:String):VideoCalibration.Sample?{
+  val result=synchronized(resourceLock){
+   if(connectionId!=id||id.isEmpty()||calibrationSession==null)return null
+   val owner=calibrationSession
+   calibrationSession=null
+   if(closed||failed.get()||session!==owner||owner?.isClosed!=false){sink?.cancelVideoCalibration();return null}
+   sink?.finishVideoCalibration()
+  }?:return null
+  val (sample,jitter)=result
+  val channel=runtimeHotspot?.channelNumber?:0
+  val summary="requestedFps=${sample.requestedFps} durationMs=${sample.durationMs} receivedFrames=${sample.receivedFrames} "+
+   "activeFrames=${sample.movingFrames} submittedFrames=${sample.surfaceSubmittedFrames} "+
+   "worstFpsMilli=${sample.lowestWindowSurfaceFpsMilli?:0} surfaceGapMaxMs=${sample.surfaceGapMaxMs} "+
+   "pressureSkips=${sample.pressureSkips} droppedFrames=${sample.droppedFrames} "+
+   "receiveToSurfaceMaxMs=${sample.receiveToSurfaceMaxMs} deliveryJitterMaxMs=$jitter "+
+   "networkBackend=${networkBackend()} channel=$channel codec=${sink?.videoDecoderName?:"unknown"} completed=${sample.completed}"
+  runCatching{MainActivity.record(this,"VIDEO_CALIBRATION_SAMPLE",JSONObject()
+   .put("eventType","video_calibration_sample").put("connection",id).put("requestedFps",sample.requestedFps)
+   .put("durationMs",sample.durationMs).put("diagnosticSummary",summary))}
+  return sample
+ }
+ private fun cancelCalibration(id:String){synchronized(resourceLock){
+  if(id.isNotEmpty()&&connectionId==id){calibrationSession=null;sink?.cancelVideoCalibration()}
+ }}
  private val airplayTcpAccepted=java.util.concurrent.atomic.AtomicBoolean(false)
  private val watchdog=Executors.newSingleThreadScheduledExecutor()
  private var firstFrameWatch:ScheduledFuture<*>?=null // protected by resourceLock
@@ -587,6 +681,7 @@ class WiredService:Service() {
  }
  private fun checkFirstFrame(){synchronized(resourceLock){
   if(closed||videoReady||session==null){firstFrameWatch?.cancel(false);firstFrameWatch=null;firstFrameExpectedAt=0L;return}
+  if(session?.hasRenderedVideo==true)return
   if(surface?.isValid!=true){firstFrameExpectedAt=0L;return}
   val now=SystemClock.elapsedRealtime()
   if(firstFrameExpectedAt==0L){firstFrameExpectedAt=now;return}
@@ -596,7 +691,8 @@ class WiredService:Service() {
    fail(IOException("First picture timed out after ${FIRST_FRAME_WAIT_MS/1000} seconds ($pending)"),"first_video_watchdog")
   }
  }}
- private fun firstPictureSubmitted(){synchronized(resourceLock){
+ // Called by the service watchdog while holding resourceLock.
+ private fun firstPictureSubmitted(renderedAtMs:Long){
   if(closed||failed.get()||videoReady)return
   videoReady=true
   runtimeHealth.begin(System.nanoTime())
@@ -605,10 +701,10 @@ class WiredService:Service() {
   firstFrameWatch?.cancel(false);firstFrameWatch=null
   activeDiagnosticStage="video_active"
   CrashEvidence.updateStage(this,connectionId,"video_active",usbLinked,true,lastIap2MessageId)
-  startup.firstFrame(SystemClock.elapsedRealtime());reportStartup("first_wifi_frame")
+  startup.firstFrame(renderedAtMs);reportStartup("first_wifi_frame")
   captureRuntimeHotspot("first_frame")
   note("VIDEO_READY","Wi-Fi AirPlay video decoded; press Back to show controls")
- }}
+ }
  private val listener=object:AirPlaySessionListener {
   override fun claimProjection(session:AirPlaySession):Boolean=synchronized(resourceLock){
    if(closed||session.isClosed||!sessions.contains(session))return@synchronized false
@@ -627,6 +723,7 @@ class WiredService:Service() {
     if(videoReady)runtimeHealth.begin(System.nanoTime())
    }
    this@WiredService.session=session;sessionGeneration++;lastFailure=null;wiredStartWatchdog?.sessionActive()
+    syncVehicleNightMode()
    resourceLock.notifyAll()
    refreshMediaButtonOwner()
    confirmBootPeerIfProjected(session)
@@ -636,22 +733,27 @@ class WiredService:Service() {
     wifiHandoff?.cancelPhoneResume()
     if(session.hasRenderedVideo)finishWifiRecovery("first_frame")
    }
+   if(!videoReady&&session.hasRenderedVideo){onVideoFrameRendered(session);return}
    if(!videoReady){
     phase("first_video")
     if(firstFrameWatch==null)firstFrameWatch=watchdog.scheduleWithFixedDelay(::checkFirstFrame,1,1,TimeUnit.SECONDS)
     note("AIRPLAY_ACTIVE","CarPlay协议会话已建立，等待画面和声音")
    }
   }}
-  override fun onVideoFrameRendered(session:AirPlaySession){synchronized(resourceLock){
-   if(closed||this@WiredService.session!==session)return
-   confirmBootPeerIfProjected(session)
-   if(wifiRecovery!=null)finishWifiRecovery("first_frame")
-  }}
+  override fun onVideoFrameRendered(session:AirPlaySession){
+   runCatching{watchdog.execute{synchronized(resourceLock){
+    if(closed||session.isClosed||this@WiredService.session!==session)return@synchronized
+    firstPictureSubmitted(session.firstVideoSubmittedAtMs)
+    confirmBootPeerIfProjected(session)
+    if(wifiRecovery!=null)finishWifiRecovery("first_frame")
+   }}}
+  }
   override fun onSessionEnded(session:AirPlaySession){synchronized(resourceLock){
    if(closingStalledSession===session)closingStalledSession=null
    if(projectionOwner===session)projectionOwner=null
    if(bluetoothHandoffRequestedBy===session)bluetoothHandoffRequestedBy=null
    val wasActive=this@WiredService.session===session;if(wasActive){this@WiredService.session=null;sessionGeneration++;refreshMediaButtonOwner()};val endedGeneration=sessionGeneration;sessions.remove(session)
+   if(calibrationSession===session){calibrationSession=null;sink?.cancelVideoCalibration()}
    if(closed)return
    val protocolFailed=session.protocolFailure!=null
    if(wasActive){
@@ -696,7 +798,12 @@ class WiredService:Service() {
     maybeReleaseBluetoothBootstrap()
    }
   }}
-  override fun onDebugLog(message:String){log("AIRPLAY",message)}
+  override fun onDebugLog(message:String){
+   if(message.startsWith("airplay vehicle night_mode_written ")){
+    recordVehicleIntegration("night_mode_written",message.removePrefix("airplay vehicle night_mode_written "))
+   }
+   log("AIRPLAY",message)
+  }
   override fun onTransportError(message:String){fail(IOException(message),"airplay_transport")}
   override fun onProtocolFailure(session:AirPlaySession,evidence:AirPlayFailureEvidence){
    if(rawAirPlayFailureCount.incrementAndGet()>1)return
@@ -720,7 +827,8 @@ class WiredService:Service() {
   MainActivity.record(this,"PROJECTION_STARTUP_STEP",JSONObject().put("eventType",event).put("stage",stage).put("diagnosticSummary",summary).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))
  }catch(_:Exception){}}
  fun log(stage:String,text:String){if(text.startsWith("TRACE ")||stage=="CONTROL"&&text.startsWith("iap2 rx=")&&text.substringAfter("0x","").toIntOrNull(16)?.let{DiagnosticPolicy.skipFrame(it)}==true)return
-  val projectionStep=when(stage){
+  val videoWindow=text.startsWith("Receive: video eventType=video_rx_window ")||text.startsWith("video_progress ")
+  val projectionStep=if(videoWindow)null else when(stage){
    "AIRPLAY"->airPlayStartupStep.find(text)?:videoStartupStep.find(text)
    "MEDIA"->videoStartupStep.find(text)
    else->null
@@ -732,7 +840,8 @@ class WiredService:Service() {
    return
   }
   val metric=when {stage=="MEDIA"&&(text.startsWith("video_progress ")||text.startsWith("audio_progress ")||text.startsWith("audio_checkpoint "))->(if(text.startsWith("audio_checkpoint "))"audio_progress" else text.substringBefore(' '))+if(text.startsWith("audio_progress ")||text.startsWith("audio_checkpoint ")) ":"+text.substringAfter("role=").substringBefore(' ') else "";stage=="AIRPLAY"&&text.startsWith("audio_modes ")->"audio_modes";stage=="MEDIA"&&text.startsWith("microphone_")->"microphone";stage=="AIRPLAY"&&text.startsWith("Receive:")->text.substringBefore(" packets=").take(80);else->null}
-  if(metric!=null&&(latestPerformance.containsKey(metric)||latestPerformance.size<12))latestPerformance[metric]="ageMs=${SystemClock.elapsedRealtime()-bornAt} "+text.take(1200)
+  val detail=if(videoWindow)"$text requestedFps=$selectedFps" else text
+  if(metric!=null&&(videoWindow||latestPerformance.containsKey(metric)||latestPerformance.size<12))latestPerformance[metric]="ageMs=${SystemClock.elapsedRealtime()-bornAt} "+detail.take(1200)
   val eventType=when{
    stage=="MEDIA"&&text.startsWith("microphone_send_timing ") -> "MICROPHONE_UPLINK"
    stage=="MEDIA"&&text.startsWith("microphone_input_levels ") -> "MICROPHONE_INPUT_LEVELS"
@@ -742,7 +851,7 @@ class WiredService:Service() {
        "AUDIO_SPEECH_RECEIVE"
    else -> stage
   }
-  try{MainActivity.record(this,eventType,JSONObject().put("detail",text.take(1200)).put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}}
+  try{MainActivity.record(this,eventType,JSONObject().put("detail",detail.take(1200)).put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}}
  fun note(stage:String,text:String,bootRetryable:Boolean=false,runtimeRetryDevice:UsbDevice?=null){
   progressStage=stage;progressMessage=text
   if(stage=="PHONE_START"&&text.startsWith("PHONE_PROBE http://"))activeProbeUrl=text.substring("PHONE_PROBE ".length).trim()
@@ -817,7 +926,52 @@ class WiredService:Service() {
   if(useP2p)return IOException("P2P_CONNECTION_FAILED ${detail}请保持 iPhone 的蓝牙和 Wi-Fi 已开启，并提交日志。",cause)
   return IOException("WIFI_CHECK_SETTINGS ${detail}请确认车载热点仍开启，可在 iPhone 上手动加入该热点后重试。",cause)
  }
- override fun onCreate(){super.onCreate();live=this;audioObserver=OemAudioObserver(this);wheelControl=WheelControl(this,object:WheelControl.Sink {override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&it.canSendInput()};override fun send(token:Any,action:Int):Boolean {val current=this@WiredService.session;if(closed||current==null||current!==token||current.isClosed)return false;return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);5->current.invokeSiri();else->false}}});usb=getSystemService(Context.USB_SERVICE) as UsbManager}
+  override fun onCreate(){
+   super.onCreate()
+   usb=getSystemService(Context.USB_SERVICE) as UsbManager
+   audioObserver=OemAudioObserver(this)
+   wheelControl=WheelControl(this,object:WheelControl.Sink {
+    override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&it.canSendInput()}
+    override fun send(token:Any,action:Int):Boolean {
+     val current=this@WiredService.session
+     if(closed||current==null||current!==token||current.isClosed)return false
+     return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);5->current.invokeSiri();else->false}
+    }
+   })
+   val signals=LegacyVehicleSignals(this){snapshot->
+    if(snapshot.night!=lastVehicleNight){
+     lastVehicleNight=snapshot.night
+     syncVehicleNightMode()
+    }
+   }
+   vehicleSignals=signals
+   live=this
+   if(signals.isSupported())signals.start()
+  }
+
+  private fun syncVehicleNightMode(){
+   if(closed||session==null||!themeQueued.compareAndSet(false,true))return
+   try{
+    themeWorker.execute {
+     themeQueued.set(false)
+     val target=session?.takeUnless{it.isClosed}?:return@execute
+     val night=vehicleSignals?.snapshot()?.night?:return@execute
+     if(closed||session!==target||themeSession===target&&themeValue==night)return@execute
+     // AirPlay retains a pending theme until its event channel opens.
+     val written=target.setNightMode(night)
+     themeSession=target
+     themeValue=night
+     if(!written&&!closed&&!target.isClosed)recordVehicleIntegration("night_mode_pending","state=${if(night)"night" else "day"}")
+    }
+   }catch(_:RejectedExecutionException){themeQueued.set(false)}
+  }
+
+  private fun recordVehicleIntegration(stage:String,summary:String){
+   val event=if(stage=="yaw_estimate")"VEHICLE_YAW_ESTIMATE" else "VEHICLE_INTEGRATION"
+   try{MainActivity.record(this,event,JSONObject().put("stage",stage)
+     .put("elapsedMs",SystemClock.elapsedRealtime()-bornAt).put("diagnosticSummary",summary))}
+   catch(_:Exception){}
+  }
  private fun shouldOwnMediaButtons():Boolean =
   !closed && !failed.get() && videoReady && session?.isClosed==false
 
@@ -910,7 +1064,12 @@ class WiredService:Service() {
   if(cleanupCount.get()>0||connectingWorkers.get()>0||MediaWorkers.busy()){fail(IOException("Previous connection is still releasing; retry shortly"),"previous_connection_cleanup");return START_NOT_STICKY}
   started=true;registerDetachReceiver()
   if(!useP2p)registerHotspotRecoveryReceiver()
-  CrashEvidence.begin(this,connectionId);selectedFps=15;log("VIDEO_CONFIG","requestedFps=$selectedFps width=${ProjectionConfig.WIDTH} height=${ProjectionConfig.HEIGHT}");log("CONNECT_BUILD",runCatching{packageManager.getPackageInfo(packageName,0).versionName}.getOrDefault("unknown"))
+  CrashEvidence.begin(this,connectionId)
+  val benchmarkFps=i?.getIntExtra(EXTRA_BENCHMARK_FPS,0)?.takeIf{it in PlaybackOptions.rates()}
+  benchmarkConnection=benchmarkFps!=null
+  selectedFps=benchmarkFps?:PlaybackOptions.read(this)
+  log("VIDEO_CONFIG","requestedFps=$selectedFps width=${ProjectionConfig.WIDTH} height=${ProjectionConfig.HEIGHT}")
+  log("CONNECT_BUILD",runCatching{packageManager.getPackageInfo(packageName,0).versionName}.getOrDefault("unknown"))
   note("CONNECT_START",if(useP2p)"正在准备 Wi-Fi Direct 局域网和 USB 蓝牙" else "正在检查车载热点并准备 USB 蓝牙")
   log("HYBRID_TRANSPORT","transportMode=${wirelessTransportMode()} sdk=${Build.VERSION.SDK_INT} nativeNcmUsed=false vpnUsed=false donglePresent=${usbBtDevice!=null}")
   watchdog.schedule({synchronized(resourceLock){
@@ -1156,6 +1315,7 @@ class WiredService:Service() {
   val savedPeer=hybridPrefs.getString(peerPreference,null)?:hybridPrefs.getString(MainActivity.PREF_USB_BT_PEER,null)
   val selection=WirelessPhoneReconnect.choose(savedPeer,dongleMac,reselectPhone)
   if(runtimeReconnect&&selection.remembered==null)throw IOException("找不到这只适配器已确认的 iPhone，请手动连接。")
+  if(benchmarkConnection&&selection.remembered==null)throw IOException("画面检测需要已确认的 iPhone。")
   val preferred=WirelessPhoneReconnect.choose(verifiedRecord,dongleMac,reselectPhone).remembered
   val selectedPhone=when{
    activePhoneConnect->{
@@ -1170,8 +1330,11 @@ class WiredService:Service() {
     null
    }
   }
-  usbLinked=true
   val rfcommPeerAddress=btStack.rfcommPeerAddress
+  if(benchmarkConnection&&!selection.remembered.equals(rfcommPeerAddress,ignoreCase=true)){
+   throw IOException("画面检测连接到了不同的蓝牙设备。")
+  }
+  usbLinked=true
   val confirmedPhone=WirelessPhoneReconnect.confirmedRecord(dongleMac,selectedPhone,rfcommPeerAddress)
   val rememberedPhoneConfirmed=selection.remembered!=null&&confirmedPhone!=null
   confirmedPhone?.let{record->
@@ -1238,7 +1401,8 @@ class WiredService:Service() {
   try{MainActivity.record(this,"HYBRID_IAP2_IDENTITY",JSONObject().put("stage","configured").put("iap2Profile",hybridProfile).put("bluetoothGroup17Enabled",true).put("usbHostGroup16Enabled",false).put("bluetoothIdentitySource","usb_hci_controller_address").put("wifiCredentialsIncluded",includeWifiCredentials).put("activeIap2Transport","usb_bt_rfcomm"))}catch(_:Throwable){}
   phase("airplay_listener")
   note("HYBRID_WIFI_HANDOFF",if(useP2p)"正在 Wi-Fi Direct 网卡上启动 AirPlay。" else "正在车载热点网卡上启动 AirPlay。")
-  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,{log("MEDIA",it);if(it=="video_rendered_frames=1")firstPictureSubmitted()})
+  val preferredDecoder=if(LegacyCarHotspot.isSupported(this))mx9a0AvcDecoder else null
+  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,preferredDecoder){log("MEDIA",it)}
   renderer.onVideoFailure={fail(IOException("video decode failure",it),"video_decoder")};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
   val media=CarPlayMediaEngine(renderer,true);val pairings=store.pairings()
   val ipv6ListenerAvailable=ipv6Address!=null
@@ -1322,12 +1486,19 @@ class WiredService:Service() {
    val wirelessIdentity=Iap2WirelessIdentification(hybridBluetoothMac,wifi.ssid)
    val appVersion=runCatching{packageManager.getPackageInfo(packageName,0).versionName}.getOrNull()?.takeIf{it.isNotBlank()}?:"unknown"
    val ident=Iap2IdentificationConfig(bluetoothName,"SongDM-MX9A0","Independent",store.hostId,appVersion,"API17",0,language="zh",wireless=wirelessIdentity,wirelessCarPlaySsid=wifi.ssid,usbHostTransportComponentEnabled=false)
-  val runtimeIdent=ident.copy(usbHostTransportComponentEnabled=false)
+  val offerGnss=LegacyCarPlayLocationProvider.canReport(this)
+  val offerCanSpeed=vehicleSignals?.isSupported()==true
+  val runtimeIdent=ident.copy(locationInformationEnabled=offerGnss||offerCanSpeed,
+    gnssPositionEnabled=offerGnss,vehicleSpeedEnabled=offerCanSpeed)
+  recordVehicleIntegration("location_offer","gnssOffered=$offerGnss pascdOffered=$offerCanSpeed")
   val authenticatedPhoneAddress=java.util.concurrent.atomic.AtomicReference<String?>(rfcommPeerAddress?:selectedPhone)
   val handoff=HybridWirelessHandoff(
    this,wifi.localAddress,configAir,identity,runtimeIdent,endpoint,auth,
    ipv6Address,authenticatedPhoneAddress::get,
-   onTunnelReady=::maybeReleaseBluetoothBootstrap,
+    onTunnelReady=::maybeReleaseBluetoothBootstrap,
+    locationProvider={LegacyCarPlayLocationProvider(this,vehicleSignals,offerGnss,offerCanSpeed){summary->
+     recordVehicleIntegration(if(summary.startsWith("yaw_estimate "))"yaw_estimate" else "location_source",summary)
+    }},
   ){type,data->try{data.put("elapsedMs",SystemClock.elapsedRealtime()-bornAt);MainActivity.record(this,type,data)}catch(_:Throwable){}}
   own(handoff,"wireless_handoff");wifiHandoff=handoff
   media.setIapTunnelHandler(handoff::attachTunnel)
@@ -1435,7 +1606,13 @@ class WiredService:Service() {
      .put("localPort",airplayPort).put("addressCount",invitationAddresses.size).put("ipv6ListenerAvailable",ipv6ListenerAvailable)
      .put("apBssidPresent",wifi.apBssid!=null).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
    },
-   onIncoming={frame->if(inboundEvidenceCount.getAndIncrement()<32){try{MainActivity.record(this,"HYBRID_IAP2_RX",JSONObject().put("stage",if(startSent.get())"after_start_session" else "before_start_session").put("messageId",frame.messageId).put("payloadBytes",frame.payload.size).put("afterStartSession",startSent.get()).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Throwable){}}},
+   onIncoming={frame->
+    when(frame.messageId){
+     0x5201->routeMetadata.incrementAndGet(0)
+     0x5202->routeMetadata.incrementAndGet(1)
+    }
+    if(inboundEvidenceCount.getAndIncrement()<32){try{MainActivity.record(this,"HYBRID_IAP2_RX",JSONObject().put("stage",if(startSent.get())"after_start_session" else "before_start_session").put("messageId",frame.messageId).put("payloadBytes",frame.payload.size).put("afterStartSession",startSent.get()).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Throwable){}}
+   },
    onProgress={line->
     log("CONTROL",line)
     if(line.startsWith("iap2 identify ")){
@@ -1614,6 +1791,9 @@ class WiredService:Service() {
   wiredStartWatchdog?.terminate();wiredStartWatchdog=null
   runtimeWatch?.cancel(false);runtimeWatch=null
   wifiHandoff?.cancelPhoneResume()
+   themeWorker.shutdownNow()
+   val stopSignals=Runnable{vehicleSignals?.stop()}
+   if(Looper.myLooper()==Looper.getMainLooper())stopSignals.run() else mainHandler.post(stopSignals)
   if(!failed.get())note("DISCONNECTED","CarPlay 已断开，正在释放连接");
   reportStartup(if(videoReady)"released_after_video" else "ended_before_video");audioObserver?.close();wheelControl?.close();usbLinked=false;watchdog.shutdownNow();work.shutdownNow();input.shutdownNow()
   log("RELEASE_BEGIN","handles=${owned.size} sessions=${sessions.size}")

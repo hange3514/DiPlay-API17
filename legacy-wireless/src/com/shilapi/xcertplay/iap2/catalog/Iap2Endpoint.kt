@@ -399,7 +399,7 @@ object Iap2Endpoints {
         "LocationInformation",
         "Location",
         Iap2Direction.ACCESSORY_TO_IPHONE,
-        fields = listOf(field(0, "NMEA", Iap2WireType.STRING)),
+        fields = listOf(field(0, "NMEA", Iap2WireType.STRING, repeatable = true)),
     )
     val STOP_LOCATION_INFORMATION = endpoint(
         0xfffc,

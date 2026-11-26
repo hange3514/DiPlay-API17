@@ -4,6 +4,7 @@ package com.shilapi.xcertplay.airplay
 internal class StreamReceiveStats(
     private val label: String,
     private val report: (String) -> Unit,
+    private val video: Boolean = false,
     private val nowNs: () -> Long = System::nanoTime,
 ) {
     private var windowStart = nowNs()
@@ -30,12 +31,48 @@ internal class StreamReceiveStats(
     private var decryptBytes = 0L
     private var decryptSumNs = 0L
     private var maxDecryptNs = 0L
+    private var headerReceivedNs = 0L
+    private var videoHeaderMaxNs = 0L
+    private var videoBodyMaxNs = 0L
+    private var videoFrames = 0
+    private var lastVideoSenderNs = 0L
+    private var lastVideoArrivalNs = 0L
+    private var senderGapSamples = 0
+    private var senderGapMaxNs = 0L
+    private var arrivalGapMaxNs = 0L
+    private var deliveryJitterMaxNs = 0L
 
     fun reading() { readStart = nowNs() }
+
+    fun videoHeaderReceived() {
+        headerReceivedNs = nowNs()
+        videoHeaderMaxNs = maxOf(videoHeaderMaxNs, headerReceivedNs - readStart)
+    }
+
+    fun videoFrame(senderNs: Long, arrivalNs: Long) {
+        videoFrames++
+        if (lastVideoArrivalNs != 0L && arrivalNs >= lastVideoArrivalNs) {
+            val arrivalGap = arrivalNs - lastVideoArrivalNs
+            arrivalGapMaxNs = maxOf(arrivalGapMaxNs, arrivalGap)
+            if (lastVideoSenderNs > 0L && senderNs > lastVideoSenderNs) {
+                val senderGap = senderNs - lastVideoSenderNs
+                senderGapSamples++
+                senderGapMaxNs = maxOf(senderGapMaxNs, senderGap)
+                // Compare deltas only. Sender and receiver use different clocks.
+                deliveryJitterMaxNs = maxOf(deliveryJitterMaxNs, kotlin.math.abs(arrivalGap - senderGap))
+            }
+        }
+        lastVideoArrivalNs = arrivalNs
+        lastVideoSenderNs = senderNs
+    }
 
     fun received(size: Int, sequence: Int? = null, timestamp: Int? = null) {
         processingStart = nowNs()
         val readNs = processingStart - readStart
+        if (video && headerReceivedNs != 0L) {
+            videoBodyMaxNs = maxOf(videoBodyMaxNs, processingStart - headerReceivedNs)
+            headerReceivedNs = 0L
+        }
         maxReadNs = maxOf(maxReadNs, readNs)
         if (readNs >= LONG_READ_NS) readsOver250Ms++
         if (lastReceivedNs != 0L) {
@@ -82,15 +119,17 @@ internal class StreamReceiveStats(
 
     fun flush(ended: Boolean = false) {
         val now = nowNs()
-        if (!ended && now - windowStart < 5_000_000_000L) return
+        val durationNs = (now - windowStart).coerceAtLeast(0)
+        if (!ended && durationNs < 5_000_000_000L) return
         runCatching { report("Receive: $label packets=$packets bytes=$bytes readMaxMs=${maxReadNs / 1_000_000} " +
             "processMaxUs=${maxProcessNs / 1000} seqForwardGaps=$forwardGapPackets " +
             "lateOrDuplicate=$lateOrDuplicate interArrivalMaxMs=${maxInterArrivalNs / 1_000_000} " +
             "seqGapEvents=$sequenceGapEvents seqGapMax=$maxSequenceGap " +
             "seqGapLast=[$lastSequenceGap] seqGapAtMs=$lastSequenceGapAtMs ended=$ended " +
-            "windowMs=${(now - windowStart).coerceAtLeast(0) / 1_000_000} " +
+            "windowMs=${durationNs / 1_000_000} " +
             "readsOver250Ms=$readsOver250Ms seqGapAfterReadOver250Ms=$seqGapAfterReadOver250Ms " +
-            "seqMissingAfterReadOver250Ms=$seqMissingAfterReadOver250Ms" + decryptSummary()) }
+            "seqMissingAfterReadOver250Ms=$seqMissingAfterReadOver250Ms" + decryptSummary() +
+            if (video) videoSummary(durationNs) else "") }
         windowStart = now
         decryptSamples = 0
         decryptBytes = 0
@@ -110,6 +149,13 @@ internal class StreamReceiveStats(
         lastSequenceGap = "none"
         lastSequenceGapAtMs = -1L
         lateOrDuplicate = 0
+        videoHeaderMaxNs = 0L
+        videoBodyMaxNs = 0L
+        videoFrames = 0
+        senderGapSamples = 0
+        senderGapMaxNs = 0L
+        arrivalGapMaxNs = 0L
+        deliveryJitterMaxNs = 0L
     }
 
     private fun Int.toUnsignedLong(): Long = toLong() and 0xffff_ffffL
@@ -119,6 +165,14 @@ internal class StreamReceiveStats(
         val mbPerSecond = if (decryptSumNs == 0L) 0L else decryptBytes * 1_000L / decryptSumNs
         return " decryptAvgUs=${decryptSumNs / decryptSamples / 1000} decryptMaxUs=${maxDecryptNs / 1000} " +
             "decryptMBps=$mbPerSecond"
+    }
+
+    private fun videoSummary(durationNs: Long): String {
+        val fpsMilli = videoFrames * 1_000_000_000_000L / durationNs.coerceAtLeast(1L)
+        return " receivedFrames=$videoFrames receivedFpsMilli=$fpsMilli senderGapSamples=$senderGapSamples" +
+            " senderGapMaxMs=${senderGapMaxNs / 1_000_000} arrivalGapMaxMs=${arrivalGapMaxNs / 1_000_000}" +
+            " deliveryJitterMaxMs=${deliveryJitterMaxNs / 1_000_000}" +
+            " headerReadMaxMs=${videoHeaderMaxNs / 1_000_000} bodyReadMaxMs=${videoBodyMaxNs / 1_000_000}"
     }
 
     private companion object { const val LONG_READ_NS = 250_000_000L }

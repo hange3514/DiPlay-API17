@@ -14,6 +14,7 @@ final class DiagnosticLog {
   final String id,type;
   final long time;
   final int encodedLength;
+  final boolean alsaDiagnostic;
   private final byte[] encoded;
   private final boolean routine;
 
@@ -26,6 +27,9 @@ final class DiagnosticLog {
    int detailStart=event.indexOf('{');
    String name=(detailStart<0?event:event.substring(0,detailStart)).trim();
    type=name.length()<=64?name:"";
+   alsaDiagnostic="MEDIA".equals(type)&&(event.contains("microphone_alsa_")
+       ||event.contains("microphone_duplex_evidence ")||event.contains("microphone_capture_path=")
+       ||event.contains("microphone_capture_fallback "));
    encoded=(line+"\n").getBytes("UTF-8");
    encodedLength=encoded.length;
    routine=DiagnosticPolicy.routine(event);

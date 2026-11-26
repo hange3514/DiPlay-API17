@@ -1,0 +1,5 @@
+DiPlay wireless 0.1.117 automatic compatibility evidence, based on wireless 0.1.116.
+Package: local.headunit.diplay.hybrid; versionCode 118; min API 17; ABI armeabi-v7a.
+Bluetooth protocol sources descend from GPL-3.0 DiPlay-Legacy-Nissan at 90a9a09f62292aab6fffa0896f83749c70f47d9f.
+Targets: Realtek CM390 with RTL8761BU firmware and Actions CM591 (10D7:B012).
+OEM reference: MX9A0 V4.2.2.30.170830 / Linux 3.0.35-svn54963.
