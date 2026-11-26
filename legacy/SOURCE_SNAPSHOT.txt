@@ -1,6 +1,6 @@
-DiPlay API17 wired source snapshot for version 0.44.51 (versionCode 186).
+DiPlay API17 wired 0.44.52 (versionCode 187), based on the published wired 0.44.51.
 Based on shihabal3amri/DiPlay under GPL-3.0; includes application and native lwIP sources.
 This snapshot omits generated build outputs, signing keys, server credentials, and offline MFi identity files.
-The matching APK and SHA-256 are published on GitHub Release v0.44.51.
+The built APK and its verification evidence are part of this compatibility candidate.
 The APK retains the upstream-derived offline attachment identity documented in docs/AUTH_PROVENANCE.md.
 The 60 FPS and two-finger features were confirmed in wireless 0.1.109 on a 2018 BYD Song DM with an MX9A0 head unit and iPhone 15 Pro Max (iOS 26.2.1). This wired build is pending a separate in-vehicle check.

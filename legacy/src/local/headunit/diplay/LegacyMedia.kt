@@ -472,7 +472,23 @@ class LegacyMedia @JvmOverloads constructor(surface:Surface?,private val width:I
   @Synchronized fun volume(value:Float){val t=track?:return;if(appliedVolume==value)return;runCatching{if(t.setStereoVolume(value,value)==AudioTrack.SUCCESS)appliedVolume=value}}
   private fun stopIdleNavigation(){if(playing&&role=="navigation"&&!navigationActivity.active(System.nanoTime())){track?.stop();playing=false;log("navigation_idle_stopped")}}
   private fun write(input:ByteArray){val channelBytes=if(outputChannels!=f.channels)PcmEvidence.stereo(input)else input;val bytes=rateConverter?.invoke(channelBytes)?:channelBytes;pcmEvidence.observe(bytes);if(role=="navigation"&&!navigationActivity.packet(bytes,System.nanoTime())){stopIdleNavigation();return};val level=routing?.packet(role)?:playbackFocus?.packet()?:1f;volume(level);if(level==0f){mutedPackets++;progress();return};if(role=="call")CallDuplexAB.callDownlinkFirstPcm(routing?.captureContext());if(!playing){track!!.play();playing=true};if(role=="call")CallDuplexAB.injectPhaseTone(routing?.captureContext(),track!!,outputRate,outputChannels,stream);var at=0;while(at<bytes.size&&!stop.get()){val n=track!!.write(bytes,at,bytes.size-at);if(n<=0)throw IllegalStateException("AudioTrack write failed");at+=n;bytesWritten+=n};if(bytesWritten==bytes.size.toLong())log("audio_first_pcm_written bytes=${bytes.size}");progress()}
-  private fun progress(){val now=System.nanoTime();if(now-lastProgress<TimeUnit.SECONDS.toNanos(if(checkpoints<5||role=="assistant")1 else 10))return;lastHead=runCatching{track?.playbackHeadPosition?.toLong()?.and(0xffffffffL)?:lastHead}.getOrDefault(lastHead);lastProgress=now;val tag=if(checkpoints++<5)"audio_checkpoint" else "audio_progress";val endian=if(role=="call")" ${pcmEvidence.byteOrderCandidateSummary()}" else "";log("$tag role=$role stream=$stream written=$bytesWritten mutedPackets=$mutedPackets queued=${queue.size()} dropped=${queue.drops()} head=$lastHead peak=${pcmEvidence.peak} nonzero=${pcmEvidence.nonzero} volume=$appliedVolume$endian");if(role=="call")AudioRouting.logCallOutput(routing?.captureContext()?:return,track,stream,tag,bytesWritten,lastHead,appliedVolume)}
+  private fun progress() {
+   val now = System.nanoTime()
+   if (now - lastProgress < TimeUnit.SECONDS.toNanos(if (checkpoints < 5 || role == "assistant") 1 else 10)) return
+   lastHead = runCatching { track?.playbackHeadPosition?.toLong()?.and(0xffffffffL) ?: lastHead }.getOrDefault(lastHead)
+   lastProgress = now
+   val tag = if (checkpoints++ < 5) "audio_checkpoint" else "audio_progress"
+   val endian = if (role == "call") " ${pcmEvidence.byteOrderCandidateSummary()}" else ""
+   val queueDrops = queue.drops()
+   log("$tag role=$role stream=$stream written=$bytesWritten mutedPackets=$mutedPackets queued=${queue.size()} dropped=$queueDrops head=$lastHead peak=${pcmEvidence.peak} nonzero=${pcmEvidence.nonzero} volume=$appliedVolume$endian")
+   if (role == "call") {
+    val context = routing?.captureContext() ?: return
+    val summary = "codec=${f.codec.name} inputRate=${f.sampleRate} inputChannels=${f.channels}" +
+        " outputRate=$outputRate outputChannels=$outputChannels peak=${pcmEvidence.peak}" +
+        " nonzeroSamples=${pcmEvidence.nonzero} mutedPackets=$mutedPackets queueDrops=$queueDrops"
+    AudioRouting.logCallOutput(context, track, stream, tag, bytesWritten, lastHead, appliedVolume, summary)
+   }
+  }
   private fun loop(){var decoder:MediaCodec?=null
    var inputBuffers:Array<ByteBuffer>?=null;var outputBuffers:Array<ByteBuffer>?=null;var inFlight=0
    val info=MediaCodec.BufferInfo()

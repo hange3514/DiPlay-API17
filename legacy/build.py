@@ -1,13 +1,14 @@
-﻿from pathlib import Path
+from pathlib import Path
 import os, re, subprocess, sys, zipfile, shutil
 
 ROOT=Path(__file__).resolve().parent
-TC=ROOT.parents[1]/'toolchain'
+TC=Path(os.environ.get('DIPLAY_TOOLCHAIN', ROOT.parents[1]/'toolchain')).expanduser().resolve()
 JAVA=next((TC/'jdk21').glob('*/bin/java.exe'))
 BUILD=ROOT/'build'; BUILD.mkdir(exist_ok=True)
 def run(cmd, name):
     native=name in ('aapt','align','stable-aapt','stable-align')
-    argv=[os.path.relpath(x,ROOT) if native and isinstance(x,Path) else str(x) for x in cmd]
+    argv=[os.path.relpath(x,ROOT) if native and isinstance(x,Path) and x.drive == ROOT.drive
+          else str(x) for x in cmd]
     argv[0]=str(cmd[0])
     p=subprocess.run(argv,capture_output=True,cwd=ROOT if native else None)
     (BUILD/(name+'.log')).write_bytes(p.stdout+p.stderr)
@@ -47,9 +48,10 @@ if __name__=='__main__':
     if dex.exists():shutil.rmtree(dex)
     dex.mkdir()
     run([JAVA,'-Xmx3g','-cp',TC/'r8.jar','com.android.tools.r8.R8','--release','--min-api','17','--lib',TC/'android17.jar','--pg-conf',ROOT/'proguard.pro','--output',dex,'--pg-map-output',BUILD/'mapping.txt',BUILD/'core.jar',BUILD/'java.jar',TC/'kotlin-stdlib.jar',TC/'annotations.jar',TC/'bcprov.jar',TC/'bctls.jar',TC/'bcutil.jar',TC/'jmdns.jar'],'r8')
-    workspace=ROOT.parents[3];bt=workspace/'headunit-probe/tools/build-tools/android-11'
+    bt=Path(os.environ['DIPLAY_BUILD_TOOLS']).expanduser().resolve(strict=True)
+    android_jar=Path(os.environ['DIPLAY_RESOURCE_ANDROID_JAR']).expanduser().resolve(strict=True)
     res=BUILD/'res';res.mkdir(exist_ok=True)
-    run([bt/'aapt.exe','package','-f','-M',ROOT/'AndroidManifest.xml','-S',res,'-S',ROOT/'res','-A',ROOT/'assets','-I',workspace/'headunit-probe/tools/platform/android-4.4.2/android.jar','-F',BUILD/'unsigned.apk'],'aapt')
+    run([bt/'aapt.exe','package','-f','-M',ROOT/'AndroidManifest.xml','-S',res,'-S',ROOT/'res','-A',ROOT/'assets','-I',android_jar,'-F',BUILD/'unsigned.apk'],'aapt')
     with zipfile.ZipFile(BUILD/'unsigned.apk','a',compression=zipfile.ZIP_DEFLATED) as z:
         for f in (BUILD/'dex').glob('*.dex'):z.write(f,f.name)
         z.write(BUILD/'libdiplayusb.so','lib/armeabi-v7a/libdiplayusb.so')
@@ -60,6 +62,11 @@ if __name__=='__main__':
     if not match: raise SystemExit('AndroidManifest.xml has no versionName')
     safe_version=re.sub(r'[^A-Za-z0-9._-]+','_',match.group(1))
     apk=dist/('DiPlay_API17_'+safe_version+'.apk')
-    run([JAVA,'-jar',bt/'lib/apksigner.jar','sign','--ks',workspace/'headunit-probe/probe-signing.jks','--ks-key-alias','probe','--ks-pass','pass:local-probe-build','--key-pass','pass:local-probe-build','--min-sdk-version','17','--v1-signing-enabled','true','--v2-signing-enabled','true','--v3-signing-enabled','false','--v4-signing-enabled','false','--out',apk,BUILD/'aligned.apk'],'sign')
+    signing_key=Path(os.environ['DIPLAY_SIGNING_KEYSTORE']).expanduser().resolve(strict=True)
+    signing_alias=os.environ['DIPLAY_SIGNING_ALIAS']
+    run([JAVA,'-jar',bt/'lib/apksigner.jar','sign','--ks',signing_key,'--ks-key-alias',signing_alias,
+         '--ks-pass','env:DIPLAY_SIGNING_STORE_PASSWORD','--key-pass','env:DIPLAY_SIGNING_KEY_PASSWORD',
+         '--min-sdk-version','17','--v1-signing-enabled','true','--v2-signing-enabled','true',
+         '--v3-signing-enabled','false','--v4-signing-enabled','false','--out',apk,BUILD/'aligned.apk'],'sign')
     run([JAVA,'-jar',bt/'lib/apksigner.jar','verify','--min-sdk-version','17','--max-sdk-version','17','--verbose',apk],'verify')
     print('APK bytes',apk.stat().st_size)

@@ -14,10 +14,7 @@ import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.WindowManager;
 import android.widget.EditText;
-import android.widget.ArrayAdapter;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -164,7 +161,7 @@ final class CompatibilityTools {
     }
 
     private static String privacyText() {
-        return "只有你主动打开车机兼容功能并确认后，应用才会联网。点击在线更新时会发送车机型号、Android API、分辨率和当前应用版本用于匹配版本，不会在检查更新时上传日志。\n\n常规报告包含车机型号、Android 版本、屏幕规格、DiPlay 版本、随机连接编号、筛选后的诊断事件、ALSA 声卡/PCM 与只读 mixer 值、麦克风候选、错误阶段/errno、USB 状态和时序、方向盘按键观察，以及用户态 IPv6/TCP/UDP 网络状态计数。若 AirPlay 请求处理器抛出异常，本版还会记录该失败请求的解析后方法、路径、协议、请求头（最多 4 KB）、请求体（最多 8 KB，Base64 编码）、异常原文和堆栈（分别最多 2 KB / 6 KB），以及已收到的 iPhone 名称、设备 ID、Wi-Fi MAC、型号和系统/来源版本。报告筛选最多保留 1 条此类事件。它不采集连续的 CarPlay 音视频流、通话音频或麦克风录音。\n\n失败事件会包含请求内容、异常详情和手机标识，可能包含请求中的认证或设备信息。请仅在你同意该采集范围时提交。车机本地日志最多保留 24 小时，上传成功后清除已确认上传的记录；服务器报告保留到手动删除。\n\n拒绝上传不会影响本地有线 CarPlay。上传前会再次确认。当前公网报告接口使用未加密 HTTP；介意时请拒绝上传。";
+        return "只有你主动打开车机兼容功能并确认后，应用才会联网。点击在线更新时会发送车机型号、Android API、分辨率和当前应用版本用于匹配版本，不会在检查更新时上传日志。\n\n常规报告自动包含可读取的原厂车型代码、车机与固件版本、屏幕规格、DiPlay 版本、随机连接编号、筛选后的诊断事件、ALSA 声卡/PCM 与只读 mixer 值、麦克风候选、错误阶段/errno、USB 状态和时序、方向盘按键观察，以及用户态 IPv6/TCP/UDP 网络状态计数。若 AirPlay 请求处理器抛出异常，本版还会记录该失败请求的解析后方法、路径、协议、请求头（最多 4 KB）、请求体（最多 8 KB，Base64 编码）、异常原文和堆栈（分别最多 2 KB / 6 KB），以及已收到的 iPhone 名称、设备 ID、Wi-Fi MAC、型号和系统/来源版本。报告筛选最多保留 1 条此类事件。它不采集连续的 CarPlay 音视频流、通话音频或麦克风录音。\n\n失败事件会包含请求内容、异常详情和手机标识，可能包含请求中的认证或设备信息。请仅在你同意该采集范围时提交。车机本地日志最多保留 24 小时，上传成功后清除已确认上传的记录；服务器报告保留到手动删除。\n\n拒绝上传不会影响本地有线 CarPlay。上传前会再次确认。当前公网报告接口使用未加密 HTTP；介意时请拒绝上传。";
     }
 
     private static void showPrivacy(Activity activity) {
@@ -304,114 +301,49 @@ final class CompatibilityTools {
     }
 
     private static void askIssue(final MainActivity activity) {
+        askIssue(activity, "");
+    }
+
+    private static void askIssue(final MainActivity activity, String draft) {
         final EditText input = new EditText(activity);
-        input.setSingleLine(false); input.setMinLines(2); input.setMaxLines(5);
-        input.setHint("\u63cf\u8ff0\u73b0\u8c61\u548c\u590d\u73b0\u6b65\u9aa4");
-        final String[] micLabels = new String[] {"\u672a\u6d4b\u8bd5", "\u5bf9\u65b9\u542c\u5230\u8f66\u673a\u9ea6\u514b\u98ce\uff0c\u58f0\u97f3\u6e05\u695a", "\u5bf9\u65b9\u542c\u5230\u4f46\u6709\u6742\u97f3", "\u5bf9\u65b9\u542c\u4e0d\u5230\u8f66\u673a\u9ea6\u514b\u98ce"};
-        final String[] speakerLabels = new String[] {"\u672a\u6d4b\u8bd5", "\u8f66\u673a\u626c\u58f0\u5668\u80fd\u542c\u5230\u5bf9\u65b9\uff0c\u58f0\u97f3\u6e05\u695a", "\u8f66\u673a\u542c\u5230\u4f46\u6709\u6742\u97f3", "\u8f66\u673a\u5b8c\u5168\u65e0\u58f0"};
-        final String[] connectionLabels = new String[] {"\u672a\u6d4b\u8bd5", "\u8fde\u63a5\u540e\u89c2\u5bdf\u671f\u5185\u4e00\u76f4\u7a33\u5b9a", "\u89c2\u5bdf\u671f\u5185\u81ea\u52a8\u65ad\u5f00", "\u672c\u6b21\u65e0\u6cd5\u5efa\u7acb\u8fde\u63a5"};
-        final String[] keyLabels = new String[] {"\u672a\u6d4b\u8bd5", "\u6309\u540e Siri \u6210\u529f\u54cd\u5e94", "\u6309\u540e\u65e0\u53cd\u5e94", "\u6709\u53cd\u5e94\uff0c\u4f46\u7ed3\u679c\u4e0d\u6b63\u5e38"};
-        final Spinner i12Connection = createSpinner(activity, connectionLabels);
-        final Spinner i12Mic = createSpinner(activity, micLabels);
-        final Spinner i12Speaker = createSpinner(activity, speakerLabels);
-        final Spinner i15Connection = createSpinner(activity, connectionLabels);
-        final Spinner i15Mic = createSpinner(activity, micLabels);
-        final Spinner i15Speaker = createSpinner(activity, speakerLabels);
-        final Spinner voiceKey = createSpinner(activity, keyLabels);
-        final EditText i12Ios = new EditText(activity), i15Ios = new EditText(activity);
-        i12Ios.setSingleLine(true); i15Ios.setSingleLine(true);
-        i12Ios.setHint("26.2.1"); i15Ios.setHint("26.2.1");
+        input.setSingleLine(false);
+        input.setMinLines(2);
+        input.setMaxLines(5);
+        input.setHint("例如，打电话没有声音");
+        input.setText(draft);
+        input.setSelection(input.length());
         TextView hint = new TextView(activity);
-        hint.setText("\u505c\u8f66\u540e\uff0c\u4f7f\u7528\u540c\u4e00\u6761\u7ebf\u548c\u540c\u4e00 USB \u53e3\u5206\u522b\u6d4b\u8bd5\u4e24\u53f0\u624b\u673a\uff1a\u5404\u8fde\u63a5\u7ea6 3 \u5206\u949f\u6216\u76f4\u5230\u65ad\u5f00\uff0c\u5404\u6253\u4e00\u6b21\u7535\u8bdd\u5e76\u53cc\u5411\u8bf4\u51e0\u53e5\u8bdd\u3002\u539f\u5382\u8bed\u97f3\u52a9\u624b\u7ef4\u6301\u5df2\u505c\u7528\u72b6\u6001\uff0c\u6309\u4e00\u6b21\u65b9\u5411\u76d8\u8bed\u97f3\u952e\uff0c\u518d\u6309\u4e00\u4e2a\u5df2\u77e5\u6709\u6548\u7684\u97f3\u91cf\u952e\u4f5c\u5bf9\u7167\u3002\u6ca1\u6d4b\u7684\u624b\u673a\u548c\u901a\u8bdd\u65b9\u5411\u4fdd\u6301\u201c\u672a\u6d4b\u8bd5\u201d\uff1b\u4e0d\u4f1a\u5f55\u5236\u6216\u4e0a\u4f20\u901a\u8bdd\u97f3\u9891\u3002");
-        hint.setPadding(0, 0, 0, 10);
-        LinearLayout box = new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
+        hint.setText("只需描述遇到的问题。车机、声卡、通话和方向盘诊断由程序自动附带。");
+        LinearLayout box = new LinearLayout(activity);
+        box.setOrientation(LinearLayout.VERTICAL);
         int pad = Math.round(16 * activity.getResources().getDisplayMetrics().density);
         box.setPadding(pad, pad, pad, 0);
-        box.addView(hint); box.addView(input);
-        addChoice(box, activity, "iPhone 12 \u8fde\u63a5\u7a33\u5b9a\u6027", i12Connection);
-        addChoice(box, activity, "iPhone 12 \u901a\u8bdd\uff1a\u5bf9\u65b9\u662f\u5426\u542c\u5230\u8f66\u673a\u9ea6\u514b\u98ce", i12Mic);
-        addChoice(box, activity, "iPhone 12 \u901a\u8bdd\uff1a\u8f66\u673a\u662f\u5426\u542c\u5230\u5bf9\u65b9", i12Speaker);
-        addChoice(box, activity, "iPhone 15 Pro \u8fde\u63a5\u7a33\u5b9a\u6027", i15Connection);
-        addChoice(box, activity, "iPhone 15 Pro \u901a\u8bdd\uff1a\u5bf9\u65b9\u662f\u5426\u542c\u5230\u8f66\u673a\u9ea6\u514b\u98ce", i15Mic);
-        addChoice(box, activity, "iPhone 15 Pro \u901a\u8bdd\uff1a\u8f66\u673a\u662f\u5426\u542c\u5230\u5bf9\u65b9", i15Speaker);
-        addChoice(box, activity, "\u8bed\u97f3\u952e\u7ed3\u679c", voiceKey);
-        addText(box, activity, "iPhone 12 iOS \u7248\u672c\uff08\u53ef\u4e0d\u586b\uff09", i12Ios);
-        addText(box, activity, "iPhone 15 Pro iOS \u7248\u672c\uff08\u53ef\u4e0d\u586b\uff09", i15Ios);
-        ScrollView scroll = new ScrollView(activity); scroll.addView(box);
-        new AlertDialog.Builder(activity).setTitle("\u63cf\u8ff0\u9047\u5230\u7684\u95ee\u9898").setView(scroll)
-            .setPositiveButton("\u63d0\u4ea4\u95ee\u9898\u548c\u7b5b\u9009\u65e5\u5fd7", new DialogInterface.OnClickListener() { public void onClick(DialogInterface dialog, int which) {
-                submit(activity, input.getText().toString(), new int[] {i12Connection.getSelectedItemPosition(), i12Mic.getSelectedItemPosition(), i12Speaker.getSelectedItemPosition(), i15Connection.getSelectedItemPosition(), i15Mic.getSelectedItemPosition(), i15Speaker.getSelectedItemPosition(), voiceKey.getSelectedItemPosition()}, new String[] {i12Ios.getText().toString(), i15Ios.getText().toString()});
-            }})
-            .setNegativeButton("\u53d6\u6d88", null).show();
+        box.addView(hint);
+        box.addView(input);
+
+        final AlertDialog dialog = new AlertDialog.Builder(activity).setTitle("描述遇到的问题")
+            .setView(box).setPositiveButton("继续", null).setNegativeButton("取消", null).show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new android.view.View.OnClickListener() {
+            @Override public void onClick(android.view.View view) {
+                final String issue = input.getText().toString().replaceAll("^[\\s\\p{Z}]+|[\\s\\p{Z}]+$", "");
+                if (issue.isEmpty() || issue.length() > 1000) {
+                    input.setError(issue.isEmpty() ? "请填写问题现象" : "问题说明最多 1000 个字符");
+                    return;
+                }
+                dialog.dismiss();
+                new AlertDialog.Builder(activity).setTitle("确认提交")
+                    .setMessage("将问题说明和自动采集的诊断发送到维护者的服务器。诊断范围请见上传说明。公网传输使用 HTTP。")
+                    .setPositiveButton("确认提交", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface ignored, int button) { sendReport(activity, issue); }
+                    })
+                    .setNegativeButton("返回修改", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface ignored, int button) { askIssue(activity, issue); }
+                    }).show();
+            }
+        });
     }
 
-    private static Spinner createSpinner(Activity activity, String[] labels) {
-        Spinner spinner = new Spinner(activity);
-        ArrayAdapter<String> adapter = new ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinner.setAdapter(adapter);
-        return spinner;
-    }
-
-    private static void addChoice(LinearLayout box, Activity activity, String title, Spinner spinner) {
-        TextView label = new TextView(activity);
-        label.setText(title); label.setPadding(0, 10, 0, 2);
-        box.addView(label); box.addView(spinner);
-    }
-
-    private static void addText(LinearLayout box, Activity activity, String title, EditText input) {
-        TextView label = new TextView(activity);
-        label.setText(title); label.setPadding(0, 10, 0, 2);
-        box.addView(label); box.addView(input);
-    }
-
-    private static String callOutcome(int position) {
-        switch (position) {
-            case 1: return "clear";
-            case 2: return "noisy";
-            case 3: return "no_sound";
-            default: return "not_tested";
-        }
-    }
-
-    private static String connectionOutcome(int position) {
-        switch (position) { case 1: return "stable"; case 2: return "disconnected"; case 3: return "connect_failed"; default: return "not_tested"; }
-    }
-
-    private static String keyOutcome(int position) {
-        switch (position) { case 1: return "siri_opened"; case 2: return "no_response"; case 3: return "other"; default: return "not_tested"; }
-    }
-
-    private static String cleanIosVersion(String value) {
-        String version = value == null ? "" : value.trim();
-        return version.matches("[0-9]{1,3}(\\.[0-9]{1,3}){0,2}") ? version : "";
-    }
-
-    private static JSONObject phoneTest(String connection, String mic, String speaker, String iosVersion) throws Exception {
-        return new JSONObject().put("connection", connection).put("remoteHeardCarMic", mic).put("inCarHeardRemote", speaker).put("iosVersion", cleanIosVersion(iosVersion));
-    }
-
-    private static void submit(final MainActivity activity, final String issueText, final int[] choices, final String[] iosVersions) {
-        final String issue = issueText == null ? "" : issueText.trim();
-        if (issue.length() == 0) { new AlertDialog.Builder(activity).setMessage("\u8bf7\u5148\u586b\u5199\u95ee\u9898\u73b0\u8c61\uff1b\u4ec5\u62a5\u544a\u73af\u5883\u65f6\u53ef\u5199\u201c\u73af\u5883\u517c\u5bb9\u6027\u6d4b\u8bd5\u201d\u3002").setPositiveButton("\u8fd4\u56de", null).show(); return; }
-        if (issue.length() > 1000) { new AlertDialog.Builder(activity).setMessage("\u95ee\u9898\u8bf4\u660e\u6700\u591a 1000 \u4e2a\u5b57\u7b26\u3002").setPositiveButton("\u8fd4\u56de", null).show(); return; }
-        if (choices == null || choices.length != 7 || iosVersions == null || iosVersions.length != 2) { new AlertDialog.Builder(activity).setMessage("\u6d4b\u8bd5\u7ed3\u679c\u4e0d\u5b8c\u6574\uff0c\u8bf7\u91cd\u65b0\u63d0\u4ea4\u3002").setPositiveButton("\u8fd4\u56de", null).show(); return; }
-        final String i12Mic = callOutcome(choices[1]), i12Speaker = callOutcome(choices[2]);
-        final String i15Mic = callOutcome(choices[4]), i15Speaker = callOutcome(choices[5]);
-        final String i12Connection = connectionOutcome(choices[0]), i15Connection = connectionOutcome(choices[3]);
-        final String micOutcome = !"not_tested".equals(i12Mic) ? i12Mic : i15Mic;
-        final String speakerOutcome = !"not_tested".equals(i12Speaker) ? i12Speaker : i15Speaker;
-        final JSONObject phoneTests;
-        try { phoneTests = new JSONObject().put("iphone12", phoneTest(i12Connection, i12Mic, i12Speaker, iosVersions[0])).put("iphone15Pro", phoneTest(i15Connection, i15Mic, i15Speaker, iosVersions[1])); }
-        catch (Exception e) { new AlertDialog.Builder(activity).setMessage("\u65e0\u6cd5\u751f\u6210\u624b\u673a\u6d4b\u8bd5\u7ed3\u679c\uff0c\u8bf7\u91cd\u8bd5\u3002").setPositiveButton("\u8fd4\u56de", null).show(); return; }
-        final String voiceKeyOutcome = keyOutcome(choices[6]);
-        new AlertDialog.Builder(activity).setTitle("\u786e\u8ba4\u63d0\u4ea4")
-            .setMessage("\u5c06\u4e0a\u4f20\u7ecf\u7b5b\u9009\u7684\u65e5\u5fd7\u3001USB \u4ea7\u54c1\u7c7b\u578b/\u63a5\u53e3\u4fe1\u606f\u3001\u65b9\u5411\u76d8\u952e\u503c\u4e0e\u5904\u7406\u7ed3\u679c\uff0c\u4ee5\u53ca\u4f60\u9009\u62e9\u7684\u901a\u8bdd\u548c\u65ad\u8fde\u7ed3\u679c\u3002\u82e5 AirPlay \u8bf7\u6c42\u5904\u7406\u5931\u8d25\uff0c\u62a5\u544a\u8fd8\u53ef\u80fd\u5305\u542b\u5931\u8d25\u8bf7\u6c42\u5185\u5bb9\u3001\u5f02\u5e38\u539f\u6587/\u5806\u6808\u53ca iPhone \u8bbe\u5907\u6807\u8bc6\uff1b\u8be5\u4e8b\u4ef6\u7684\u8bf7\u6c42\u4f53\u6700\u591a 8 KB\uff0c\u4e14\u4e0d\u5305\u542b\u8fde\u7eed\u97f3\u89c6\u9891\u6d41\u3002\u516c\u7f51\u4f20\u8f93\u4f7f\u7528 HTTP\u3002\u786e\u8ba4\u63d0\u4ea4\uff1f")
-            .setPositiveButton("\u786e\u8ba4\u63d0\u4ea4", new DialogInterface.OnClickListener() { public void onClick(DialogInterface dialog, int which) { sendReport(activity, issue, micOutcome, speakerOutcome, phoneTests, voiceKeyOutcome); }})
-            .setNegativeButton("\u8fd4\u56de\u4fee\u6539", null).show();
-    }
-
-    private static void sendReport(final MainActivity activity, final String issue, final String micOutcome, final String speakerOutcome, final JSONObject phoneTests, final String voiceKeyOutcome) {
+    private static void sendReport(final MainActivity activity, final String issue) {
         if (activity.busy || activity.closed) return;
         activity.busy = true;
         activity.showOperation("正在筛选并提交兼容性报告…");
@@ -420,14 +352,15 @@ final class CompatibilityTools {
                 UsbPresenceLog.recordCurrentPhones(activity, "report_submit");
                 FilteredEvents filtered = filterEvents(MainActivity.snapshot(activity));
                 String version = activity.getPackageManager().getPackageInfo(activity.getPackageName(), 0).versionName;
-                JSONObject alsaEnvironment;
-                try { alsaEnvironment = AlsaCapturePathSelector.environment(activity); }
-                catch (Throwable ignored) { alsaEnvironment = new JSONObject().put("status", "unavailable"); }
+                JSONObject alsaEnvironment = CompatibilityEvidence.alsaEnvironment(activity);
+                CompatibilityEvidence.appendIdentity(filtered.events, VehicleIdentityEvidence.collect(activity));
                 JSONObject body = new JSONObject().put("profile", profile(activity)).put("appVersion", version)
-                    .put("issue", issue).put("events", filtered.events).put("alsaEnvironment", alsaEnvironment)
-                    .put("callObservation", new JSONObject().put("remoteHeardCarMic", micOutcome).put("inCarHeardRemote", speakerOutcome))
-                    .put("phoneTests", phoneTests).put("keyObservation", new JSONObject().put("voiceKey", voiceKeyOutcome));
+                    .put("issue", issue).put("events", filtered.events).put("alsaEnvironment", alsaEnvironment);
                 JSONObject receipt = post("/report", body);
+                if (!receipt.optString("id").matches("[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}") ||
+                    receipt.optInt("events", -1) != filtered.events.length()) {
+                    throw new java.io.IOException("服务器回执与本次报告不匹配");
+                }
                 final String message = "提交成功。报告编号：" + receipt.optString("id") +
                     "\n上传事件：" + receipt.optInt("events") + " 条；已清除本次上传的本地记录，未上传或并发新增记录保留。服务器报告保留至手动清理；车机本地日志最多保留 24 小时。";
                 MainActivity.acknowledge(activity, filtered.acknowledgedRows);
@@ -462,13 +395,15 @@ final class CompatibilityTools {
         long first = Long.MAX_VALUE;
         for (int i = 0; i < source.length(); i++) first = Math.min(first, source.getJSONObject(i).optLong("time", 0));
         if (first == Long.MAX_VALUE) first = 0;
-        int alsaCount = 0, priorityCount = 0, transportCount = 0, networkCount = 0, networkMilestoneCount = 0;
+        final int runtimeLimit = 199; // One slot is reserved for the fresh identity observation.
+        int wheelCount = 0, callCount = 0, alsaCount = 0, priorityCount = 0;
+        int transportCount = 0, networkCount = 0, networkMilestoneCount = 0;
         int receivedWindows = 0, renderedWindows = 0;
         HashSet<String> selectedIds = new HashSet<String>();
         // Keep the newest evidence so old unsubmitted logs cannot crowd out this test run.
-        // Reserve ALSA, then direct key/USB/call evidence, then transport details before routine logs.
-        for (int pass = 0; pass < 4 && selected.size() < 200; pass++) {
-            for (int i = source.length() - 1; i >= 0 && selected.size() < 200; i--) {
+        // Reserve keys and call events separately so a busy session cannot displace either.
+        for (int pass = -1; pass < 4 && selected.size() < runtimeLimit; pass++) {
+            for (int i = source.length() - 1; i >= 0 && selected.size() < runtimeLimit; i--) {
                 JSONObject row = source.optJSONObject(i); if (row == null) continue;
                 String rowId = row.optString("id", ""); if (rowId.length() == 0 || selectedIds.contains(rowId)) continue;
                 String raw = row.optString("event", ""); int brace = raw.indexOf('{');
@@ -478,6 +413,8 @@ final class CompatibilityTools {
                 if (brace >= 0) try { detail = new JSONObject(raw.substring(brace)); } catch (Exception ignored) {}
                 String detailText = detail == null ? "" : detail.optString("detail", "");
                 boolean alsa = "MEDIA".equals(type) && isAlsaDiagnostic(detailText);
+                boolean wheel = CompatibilityEvidence.isWheel(type);
+                boolean call = CompatibilityEvidence.isAudio(type);
                 boolean priority = isHighValueDiagnostic(type);
                 boolean transport = isTransportDiagnostic(type);
                 boolean network = CompatibilityReportPolicy.isNetworkStackEvent(type);
@@ -486,14 +423,16 @@ final class CompatibilityTools {
                 String videoEvent = videoWindowEvent(type, detailText);
                 if (videoEvent != null && (pass != 0 ||
                     (VIDEO_RX_WINDOW.equals(videoEvent) ? receivedWindows : renderedWindows) >= MAX_VIDEO_WINDOWS_PER_STAGE)) continue;
-                if (pass == 0 && videoEvent == null && !((alsa && alsaCount < 40) || (networkMilestone && networkMilestoneCount < 32) || airplayFailure) ||
+                if (pass == -1 && !(wheel && wheelCount < 28 || call && callCount < 32) ||
+                    pass == 0 && videoEvent == null && !((alsa && alsaCount < 40) || (networkMilestone && networkMilestoneCount < 32) || airplayFailure) ||
                     pass == 1 && (alsa || !priority || transport || priorityCount >= 100) ||
                     pass == 2 && (alsa || !transport || transportCount >= 60 || (network && networkCount >= 36)) ||
                     pass == 3 && (alsa || priority)) continue;
                 long time = row.optLong("time", first);
+                long offset = Math.min(86400000L, Math.max(0, time - first));
                 JSONObject safeEvent;
                 if (alsa) {
-                    safeEvent = new JSONObject().put("offsetMs", Math.max(0, time - first))
+                    safeEvent = new JSONObject().put("offsetMs", offset)
                         .put("type", "ALSA_CAPTURE").put("data", parseAlsaDiagnostic(detailText));
                     alsaCount++;
                 } else {
@@ -515,6 +454,7 @@ final class CompatibilityTools {
                     String summary = diagnosticSummary(type, detailText);
                     if (!code.isEmpty()) safe.put("diagnosticCode", code);
                     if (!summary.isEmpty()) safe.put("diagnosticSummary", summary);
+                    CompatibilityEvidence.addRuntimeContext(type, detail, safe);
                     if (videoEvent != null) {
                         appendVideoWindow(safe, videoEvent, detailText);
                         if (VIDEO_RX_WINDOW.equals(videoEvent)) receivedWindows++;
@@ -524,7 +464,7 @@ final class CompatibilityTools {
                         String networkDetail = CompatibilityReportPolicy.safeNetworkDetail(detailText);
                         if (!networkDetail.isEmpty()) safe.put("networkDetail", networkDetail);
                     }
-                    safeEvent = new JSONObject().put("offsetMs", Math.max(0, time - first)).put("type", type).put("data", safe);
+                    safeEvent = new JSONObject().put("offsetMs", offset).put("type", type).put("data", safe);
                     if (priority) priorityCount++;
                     else if (transport) {
                         transportCount++;
@@ -533,6 +473,8 @@ final class CompatibilityTools {
                 }
                 selectedIds.add(rowId);
                 selected.add(new EventCandidate(time, safeEvent, new JSONObject().put("id", rowId), network, networkMilestone));
+                if (wheel) wheelCount++;
+                if (call) callCount++;
                 if (networkMilestone) networkMilestoneCount++;
             }
         }
@@ -543,9 +485,25 @@ final class CompatibilityTools {
         HashSet<String> boundedIds = new HashSet<String>();
         int remainingBytes = 42000, networkBudgetBytes = 22000, videoBudgetBytes = 10000;
         // Preserve the one bounded raw AirPlay failure before routine transport counters.
-        for (EventCandidate item : selected) if ("AIRPLAY_FAILURE_RAW".equals(item.event.optString("type"))) {
+        for (int i = selected.size() - 1; i >= 0; i--) {
+            EventCandidate item = selected.get(i);
+            if (!"AIRPLAY_FAILURE_RAW".equals(item.event.optString("type"))) continue;
             int size = item.event.toString().getBytes("UTF-8").length + 8;
-            if (size <= remainingBytes) { bounded.add(item); boundedIds.add(item.id); remainingBytes -= size; }
+            if (size <= remainingBytes) {
+                bounded.add(item); boundedIds.add(item.id); remainingBytes -= size;
+                break;
+            }
+        }
+        int wheelBytes = 5_000, audioBytes = 14_000;
+        for (int i = selected.size() - 1; i >= 0; i--) {
+            EventCandidate item = selected.get(i);
+            String type = item.event.optString("type");
+            boolean wheel = CompatibilityEvidence.isWheel(type);
+            if (!wheel && !CompatibilityEvidence.isAudio(type)) continue;
+            int size = item.event.toString().getBytes("UTF-8").length + 8;
+            if (size > remainingBytes || size > (wheel ? wheelBytes : audioBytes)) continue;
+            bounded.add(item); boundedIds.add(item.id); remainingBytes -= size;
+            if (wheel) wheelBytes -= size; else audioBytes -= size;
         }
         // Reserve the small number of stack lifecycle anchors, then a bounded recent counter window.
         for (EventCandidate item : selected) if (item.networkMilestone) {
@@ -571,7 +529,8 @@ final class CompatibilityTools {
             bounded.add(item); boundedIds.add(item.id); networkBudgetBytes -= size; remainingBytes -= size;
         }
         for (int i = selected.size() - 1; i >= 0; i--) {
-            EventCandidate item = selected.get(i); if (boundedIds.contains(item.id)) continue;
+            EventCandidate item = selected.get(i);
+            if (boundedIds.contains(item.id) || "AIRPLAY_FAILURE_RAW".equals(item.event.optString("type"))) continue;
             int size = item.event.toString().getBytes("UTF-8").length + 8;
             if (size > remainingBytes) continue;
             bounded.add(item); boundedIds.add(item.id); remainingBytes -= size;

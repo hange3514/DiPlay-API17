@@ -19,7 +19,41 @@ public final class AudioRouting implements Closeable {
   if(callUsbAssert!=null)callUsbAssert.callStarted();}
  public synchronized void endCallAudio(){if(callAudioUsers<=0)return;if(--callAudioUsers>0)return;AudioManager a=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);try{int callStream=stream("call");if(ownsCallMode&&a.getMode()==LegacyAudioPolicy.callMode())a.setMode(previousCallMode);if(ownsCallSpeaker&&a.isSpeakerphoneOn()==LegacyAudioPolicy.callSpeakerphone())a.setSpeakerphoneOn(previousCallSpeaker);if(ownsCallVolume&&a.getStreamVolume(callStream)==callMaxVolume)a.setStreamVolume(callStream,previousCallVolume,0);callRouteLog("call_audio_route_restored",previousCallMode,a.getMode(),null);}catch(Exception e){callRouteLog("call_route_restore_failed",previousCallMode,a.getMode(),e.getClass().getSimpleName());}finally{ownsCallVolume=false;ownsCallMode=false;ownsCallSpeaker=false;previousCallMode=AudioManager.MODE_NORMAL;previousCallVolume=0;callMaxVolume=0;previousCallSpeaker=false;if(callUsbAssert!=null)callUsbAssert.callEnded();}}
  private void callRouteLog(String detail,int before,int after,String error){try{AudioManager a=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);int callStream=stream("call");boolean platformPhoneStrategy=LegacyAudioPolicy.usesPlatformPhoneStrategy(secondMusic);JSONObject j=new JSONObject().put("detail",detail).put("previousMode",before).put("activeMode",after).put("platformPhoneStrategy",platformPhoneStrategy).put("modePreservedForOemRoute",!platformPhoneStrategy&&before==after).put("speakerphoneForced",platformPhoneStrategy).put("activeSpeakerphone",a.isSpeakerphoneOn()).put("speakerphonePreservedForOemRoute",!platformPhoneStrategy&&a.isSpeakerphoneOn()==previousCallSpeaker).put("previousSpeakerphone",previousCallSpeaker).put("outputStream",callStream).put("focusStream",LegacyAudioPolicy.callFocusStream(secondMusic)).put("clientFocusRequested",LegacyAudioPolicy.usesClientCallFocus(secondMusic)).put("previousVolume",previousCallVolume).put("activeVolume",a.getStreamVolume(callStream)).put("maxVolume",a.getStreamMaxVolume(callStream)).put("volumeMaxAccepted",ownsCallVolume).put("oemBtPhoneSourceRequested",false).put("audioSystem",AudioSystemEvidence.routingSnapshot(a,context));if(error!=null)j.put("error",error);MainActivity.record(context,"CALL_AUDIO_ROUTE",j);}catch(Exception ignored){}}
- public static void logCallOutput(Context c,AudioTrack t,int stream,String phase,long written,long head,float gain){try{AudioManager a=(AudioManager)c.getSystemService(Context.AUDIO_SERVICE);JSONObject j=new JSONObject().put("phase",phase).put("mode",a.getMode()).put("stream",stream).put("streamVolume",a.getStreamVolume(stream)).put("streamMax",a.getStreamMaxVolume(stream)).put("speakerphone",a.isSpeakerphoneOn()).put("bluetoothSco",a.isBluetoothScoOn()).put("bluetoothA2dp",a.isBluetoothA2dpOn()).put("wiredHeadset",a.isWiredHeadsetOn()).put("microphoneMuted",a.isMicrophoneMute()).put("musicActive",a.isMusicActive()).put("routePolicy",AudioRouteProbe.snapshot(a)).put("audioSystem",AudioSystemEvidence.routingSnapshot(a,c)).put("trackPresent",t!=null).put("writtenBytes",written).put("playbackHeadFrames",head).put("trackGain",gain).put("evidenceScope","AudioTrack queue consumption only; no amplifier loopback");if(t!=null)j.put("trackState",t.getState()).put("playState",t.getPlayState()).put("sessionId",t.getAudioSessionId()).put("nativeRate",AudioTrack.getNativeOutputSampleRate(stream));MainActivity.record(c,"CALL_OUTPUT_DIAG",j);}catch(Exception ignored){}}
+ public static void logCallOutput(Context c, AudioTrack track, int stream, String phase, long written,
+                                  long head, float gain, String pcmSummary) {
+  try {
+   AudioManager audio = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+   int volume = audio.getStreamVolume(stream);
+   int maxVolume = audio.getStreamMaxVolume(stream);
+   JSONObject routePolicy = AudioRouteProbe.snapshot(audio);
+   JSONObject audioSystem = AudioSystemEvidence.routingSnapshot(audio, c);
+   StringBuilder summary = new StringBuilder(pcmSummary)
+       .append(" streamVolume=").append(volume).append(" streamMax=").append(maxVolume);
+   JSONArray outputDevices = audioSystem.optJSONArray("streamOutputDevices");
+   if (outputDevices != null) for (int i = 0; i < outputDevices.length(); i++) {
+    JSONObject device = outputDevices.optJSONObject(i);
+    if (device == null || device.optInt("stream", -1) != stream) continue;
+    if (device.has("deviceMask")) {
+     summary.append(" outputDeviceMask=0x").append(Integer.toHexString(device.getInt("deviceMask")));
+    }
+    break;
+   }
+   JSONObject event = new JSONObject()
+       .put("phase", phase).put("mode", audio.getMode()).put("stream", stream)
+       .put("streamVolume", volume).put("streamMax", maxVolume)
+       .put("speakerphone", audio.isSpeakerphoneOn()).put("bluetoothSco", audio.isBluetoothScoOn())
+       .put("bluetoothA2dp", audio.isBluetoothA2dpOn()).put("wiredHeadset", audio.isWiredHeadsetOn())
+       .put("microphoneMuted", audio.isMicrophoneMute()).put("musicActive", audio.isMusicActive())
+       .put("routePolicy", routePolicy).put("audioSystem", audioSystem)
+       .put("trackPresent", track != null).put("writtenBytes", written).put("playbackHeadFrames", head)
+       .put("diagnosticSummary", summary.toString())
+       .put("evidenceScope", "AudioTrack queue consumption only; no amplifier loopback");
+   if (!Float.isNaN(gain) && !Float.isInfinite(gain)) event.put("trackGain", gain);
+   if (track != null) event.put("trackState", track.getState()).put("playState", track.getPlayState())
+       .put("sessionId", track.getAudioSessionId()).put("nativeRate", AudioTrack.getNativeOutputSampleRate(stream));
+   MainActivity.record(c, "CALL_OUTPUT_DIAG", event);
+  } catch (Exception ignored) { }
+ }
  public float packet(String role){PlaybackFocus f; synchronized(this){if(closed)return 0;f=focus.get(role.equals("assistant")?"media":role);}return f==null?1:f.packet();}
  public void playbackEnded(String role){PlaybackFocus f,mediaFocus;synchronized(this){if(closed)return;f=focus.get(role.equals("assistant")?"media":role);mediaFocus=role.equals("call")?focus.get("media"):null;}if(f!=null)f.playbackEnded();if(mediaFocus!=null)mediaFocus.foreground();}
  public synchronized void foreground(){if(!closed)for(PlaybackFocus f:focus.values())f.foreground();}

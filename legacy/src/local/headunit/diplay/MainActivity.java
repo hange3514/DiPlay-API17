@@ -140,7 +140,14 @@ public class MainActivity extends Activity {
   ProjectionSurface(Context c){super(c);}
   protected void onMeasure(int widthSpec,int heightSpec){int w=View.MeasureSpec.getSize(widthSpec),h=View.MeasureSpec.getSize(heightSpec);int width=Math.min(w,h*ProjectionConfig.WIDTH/ProjectionConfig.HEIGHT);setMeasuredDimension(width,width*ProjectionConfig.HEIGHT/ProjectionConfig.WIDTH);}
  }
- static void record(Context c,String name,JSONObject details)throws Exception{DiagnosticLog.record(c,name,details);}
+ static void record(Context c,String name,JSONObject details)throws Exception{
+  if("WHEEL_KEY".equals(name)&&details.has("keyCode")){
+   int code=details.optInt("keyCode",-1);
+   if(!isWheelDiagnosticKey(code)&&!(isLegacyVendorKeyCode(code)&&
+    "vendor_nontext".equals(details.optString("keyCandidate"))))return;
+  }
+  DiagnosticLog.record(c,name,details);
+ }
 
  final Runnable tryConnection=new Runnable(){public void run(){if(closed||!resumed||!connectPending||permissionPending)return;if(videoCalibration.isActive()){connectPending=false;return;}if(busy||maintenance){scheduleConnection(500);return;}if(WiredService.isBusy()){scheduleConnection(500);return;}if(preview==null||!preview.getHolder().getSurface().isValid()){scheduleConnection(100);return;}connectPending=false;requestConnection();}};
  void requestConnection(){if(connecting||permissionPending)return;if(!resumed||!preview.getHolder().getSurface().isValid()){connectPending=true;scheduleConnection(100);return;}if(WiredService.isBusy()){connectPending=true;scheduleConnection(500);return;}if(requestStartedAt==0)requestStartedAt=SystemClock.elapsedRealtime();try{record(this,"NETWORK_BACKEND_SELECTED",new JSONObject().put("backend","lwip_userland_ncm").put("vpnRequired",false).put("ipv4",false).put("ipv6",true).put("tcp",true).put("udp",true).put("uptimeMs",SystemClock.elapsedRealtime()));}catch(Exception ignored){}connectPort();}
@@ -149,6 +156,35 @@ public class MainActivity extends Activity {
  protected void onPause(){resumed=false;refreshProjectionTouch();videoCalibration.onPause();if(uiBuilt){lifecycle("pause");if(preview!=null)WiredService.detachSurface(this);}uiHandler.removeCallbacks(tryConnection);super.onPause();}
  protected void onStop(){if(uiBuilt)lifecycle("background");super.onStop();}
  public static boolean wheelProbeActive(){return false;}
+ static boolean isWheelDiagnosticKey(int code){
+  return code==KeyEvent.KEYCODE_VOLUME_UP||code==KeyEvent.KEYCODE_VOLUME_DOWN||
+   code==KeyEvent.KEYCODE_VOLUME_MUTE||code==KeyEvent.KEYCODE_MUTE||
+   code==KeyEvent.KEYCODE_CALL||code==KeyEvent.KEYCODE_ENDCALL||
+   code==KeyEvent.KEYCODE_MEDIA_STOP||code==KeyEvent.KEYCODE_MEDIA_FAST_FORWARD||
+   code==KeyEvent.KEYCODE_MEDIA_REWIND||code==KeyEvent.KEYCODE_MEDIA_RECORD||
+   CarPlayMediaButton.INSTANCE.forKeyCode(code,true)!=null||
+   CarPlayMediaButton.INSTANCE.opensSiri(code)||CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code);
+ }
+ static boolean isLegacyVendorKeyCode(int code){return Build.VERSION.SDK_INT==17&&code>=300&&code<=511;}
+ private boolean isProjectedVendorKey(KeyEvent event){
+  return isLegacyVendorKeyCode(event.getKeyCode())&&projectionMode&&hasWindowFocus()&&
+   WiredService.isVideoReady()&&event.getScanCode()>0&&
+   (event.getFlags()&(KeyEvent.FLAG_SOFT_KEYBOARD|KeyEvent.FLAG_VIRTUAL_HARD_KEY))==0&&
+   !event.isPrintingKey()&&event.getUnicodeChar()==0;
+ }
+ @Override public void onWindowFocusChanged(boolean focused){
+  super.onWindowFocusChanged(focused);
+  if(closed)return;
+  try{
+   final JSONObject details=new JSONObject().put("keyPath","activity_dispatch")
+    .put("keyDecision",focused?"observer_focused":"observer_unfocused")
+    .put("keyWindowFocused",focused).put("projectionReady",WiredService.isVideoReady())
+    .put("connection",WiredService.currentConnectionId()).put("uptimeMs",SystemClock.elapsedRealtime());
+   worker.execute(new Runnable(){public void run(){
+    try{record(MainActivity.this,"WHEEL_KEY",details);}catch(Exception ignored){}
+   }});
+  }catch(Exception ignored){}
+ }
  public boolean dispatchKeyEvent(KeyEvent event){
   int code=event.getKeyCode();boolean handled=false;String decision="pass_through";
   if(WiredService.consumeWheelDuplicate(code)){handled=true;decision="duplicate_suppressed";}
@@ -159,9 +195,20 @@ public class MainActivity extends Activity {
    handled=WiredService.sendWheelKey(code,"activity_dispatch");decision=handled?"wheel_forwarded":"wheel_unmapped_or_no_session";
   }else if(event.getAction()==KeyEvent.ACTION_DOWN)decision="key_down_observed";
   boolean delivered=handled||super.dispatchKeyEvent(event);
-  if(event.getAction()==KeyEvent.ACTION_DOWN||event.getAction()==KeyEvent.ACTION_UP&&event.getRepeatCount()<=1){
-   boolean known=code==KeyEvent.KEYCODE_VOLUME_UP||code==KeyEvent.KEYCODE_VOLUME_DOWN||code==KeyEvent.KEYCODE_MEDIA_NEXT||code==KeyEvent.KEYCODE_MEDIA_PREVIOUS||code==KeyEvent.KEYCODE_HEADSETHOOK||code==KeyEvent.KEYCODE_CALL||code==KeyEvent.KEYCODE_ENDCALL||CarPlayMediaButton.INSTANCE.opensSiri(code)||CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code);
-   if(WiredService.isVideoReady()||known)try{record(this,"WHEEL_KEY",new JSONObject().put("keyPath","activity_dispatch").put("keyCode",code).put("keyAction",event.getAction()).put("keyRepeatCount",event.getRepeatCount()).put("keySource",event.getSource()).put("keyFlags",event.getFlags()).put("keyDecision",decision).put("keyHandled",delivered).put("keyIsSiriCandidate",CarPlayMediaButton.INSTANCE.opensSiri(code)||CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code)));}catch(Exception ignored){}
+  if(event.getRepeatCount()<=1&&
+   (event.getAction()==KeyEvent.ACTION_DOWN||event.getAction()==KeyEvent.ACTION_UP)){
+   boolean known=isWheelDiagnosticKey(code);
+   try{
+    if(known||isProjectedVendorKey(event))record(this,"WHEEL_KEY",new JSONObject()
+     .put("keyPath","activity_dispatch").put("keyCandidate",known?"known_control":"vendor_nontext")
+     .put("keyCode",code).put("keyScanCode",event.getScanCode()).put("keyAction",event.getAction())
+     .put("keyRepeatCount",event.getRepeatCount()).put("keySource",event.getSource()).put("keyFlags",event.getFlags())
+     .put("keyDecision",decision).put("keyHandled",delivered).put("keyConsumedByDiPlay",handled)
+     .put("keyWindowFocused",hasWindowFocus()).put("projectionReady",WiredService.isVideoReady())
+     .put("connection",WiredService.currentConnectionId())
+     .put("keyIsSiriCandidate",CarPlayMediaButton.INSTANCE.opensSiri(code)||
+      CarPlayMediaButton.INSTANCE.opensSiriWhileCarPlay(code)));
+   }catch(Exception ignored){}
   }
   return delivered;
  }
