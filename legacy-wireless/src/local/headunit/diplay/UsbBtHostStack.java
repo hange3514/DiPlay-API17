@@ -53,6 +53,7 @@ public final class UsbBtHostStack implements Closeable {
     private BlockingDuplexByteStream stream;
     private IOException failure;
     private OutboundFailure outboundFailure;
+    private OutboundFailure rememberedFailure;
 
     public UsbBtHostStack(Context context, UsbDevice device, UsbDeviceConnection connection,
             String bluetoothName, int eirProfile, boolean outboundOnly) {
@@ -166,7 +167,15 @@ public final class UsbBtHostStack implements Closeable {
         return adapter.stopDiscoveryForHandoff();
     }
 
-    /** A single bounded direct attempt with inbound scan still disabled. */
+    public List<String> bondedPeerAddresses() {
+        return adapter.bondedPeerAddresses();
+    }
+
+    OutboundFailure lastRememberedFailure() {
+        synchronized (stateLock) { return rememberedFailure; }
+    }
+
+    /** A bounded, bond-only attempt that cannot be preempted by a different incoming phone. */
     public boolean tryRememberedPeer(String address, long timeoutMillis) throws IOException, InterruptedException {
         final String peer = canonicalAddress(address);
         if (peer == null || timeoutMillis <= 0) return false;
@@ -175,7 +184,8 @@ public final class UsbBtHostStack implements Closeable {
         try {
             synchronized (stateLock) {
                 if (failure != null) throw failure;
-                if (!ready || closed || outboundOnly || !deferPhoneConnections || outboundWorker != null
+                rememberedFailure = null;
+                if (!ready || closed || !deferPhoneConnections || outboundWorker != null
                         || inquiryRunning || peerClosed || stream != null) {
                     return false;
                 }
@@ -325,7 +335,8 @@ public final class UsbBtHostStack implements Closeable {
             synchronized (stateLock) {
                 outboundWorker = null;
                 if (!closed && failure == null && error != null) {
-                    if (!rememberedProbe) outboundFailure = error;
+                    if (rememberedProbe) rememberedFailure = error;
+                    else outboundFailure = error;
                     lastState = error.stage;
                 }
                 stateLock.notifyAll();
@@ -377,6 +388,10 @@ public final class UsbBtHostStack implements Closeable {
     }
 
     public String getLastState() { return lastState; }
+
+    boolean hasPhoneDisconnected() {
+        synchronized (stateLock) { return adapter.phoneClosedStream(stream); }
+    }
     public int getScanEnable() { return adapter.getScanEnable(); }
     public int getScanEnableStatus() { return adapter.getScanEnableStatus(); }
     public boolean isScanEnableKnown() { return getScanEnableStatus() == 0 && getScanEnable() >= 0; }

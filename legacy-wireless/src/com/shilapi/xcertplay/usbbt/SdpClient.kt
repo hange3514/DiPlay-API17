@@ -30,6 +30,7 @@ class SdpClient(
     sealed class SdpResult<out T> {
         data class Ok<T>(val value: T) : SdpResult<T>()
         data class Failed(val reason: String) : SdpResult<Nothing>()
+        object ServiceNotFound : SdpResult<Nothing>()
     }
 
     data class ParsedResponse(val attributeLists: ByteArray, val continuation: ByteArray = byteArrayOf())
@@ -103,6 +104,12 @@ class SdpClient(
                 at = attrList.contentStart + attrList.contentLength
             }
             return null
+        }
+
+        /** A complete empty attribute sequence reports no matching service records. */
+        internal fun hasNoServiceRecords(attributes: ByteArray): Boolean {
+            val (value, consumed) = runCatching { SdpCodec.decode(attributes) }.getOrNull() ?: return false
+            return value is DataElement.Sequence && value.items.isEmpty() && consumed == attributes.size
         }
 
         private fun extractRfcommScanner(data: ByteArray): Int? {
@@ -251,7 +258,9 @@ class SdpClient(
             attributes.write(response.attributeLists)
             continuation = response.continuation
             if (continuation.isEmpty()) {
-                val channel = extractRfcommChannel(ParsedResponse(attributes.toByteArray()))
+                val complete = attributes.toByteArray()
+                if (hasNoServiceRecords(complete)) return SdpResult.ServiceNotFound
+                val channel = extractRfcommChannel(ParsedResponse(complete))
                     ?.takeIf { it in 1..30 }
                     ?: return SdpResult.Failed("iAP2 service reply lacks a valid RFCOMM channel")
                 Log.i(TAG, "iAP2 RFCOMM channel=$channel")

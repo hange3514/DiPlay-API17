@@ -56,6 +56,18 @@ class ClassicUsbProtocolReplayTest {
     }
 
     @Test
+    fun completeEmptySdpResponseIsDistinctFromInvalidAttributes() {
+        val client = SdpClient(L2capLayer(7) { _, _ -> error("no radio in SDP codec replay") }, 7)
+        val server = SdpServer(emptyList())
+        val reply = server.handle(client.buildSearchAttrRequest(1, byteArrayOf()), peerMtu = 128)
+        val parsed = requireNotNull(SdpClient.parseResponse(reply, 1))
+        assertTrue(parsed.continuation.isEmpty())
+        assertTrue(SdpClient.hasNoServiceRecords(parsed.attributeLists))
+        assertFalse(SdpClient.hasNoServiceRecords(byteArrayOf(0x35)))
+        assertFalse(SdpClient.hasNoServiceRecords(parsed.attributeLists + byteArrayOf(0x00)))
+    }
+
+    @Test
     fun rfcommUsesGrantedCreditsAndLocalGrantsRemainSeparate() {
         val flow = RfcommDlcFlow(7)
         flow.negotiate(credits = true, granted = 1, peerFrame = 64)

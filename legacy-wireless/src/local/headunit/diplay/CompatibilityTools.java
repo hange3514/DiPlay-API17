@@ -460,7 +460,7 @@ final class CompatibilityTools {
     }
 
     private static void askIssue(final MainActivity activity, String draft) {
-        askIssue(activity, draft, null, false, false);
+        askIssue(activity, draft, null, false, true);
     }
 
     private static void askIssue(final MainActivity activity, String draft, String selectedMicId,
@@ -489,7 +489,7 @@ final class CompatibilityTools {
         }
         final CheckBox carLife = new CheckBox(activity);
         if (HotspotArtifactUpload.hasCarLife(activity)) {
-            carLife.setText("附带原厂百度 CarLife 程序，用于分析声音");
+            carLife.setText("附带原厂百度 CarLife 安装包，用于分析方向盘按键");
             carLife.setChecked(includeCarLife);
             box.addView(carLife);
         }
@@ -642,7 +642,7 @@ final class CompatibilityTools {
             message += "\n\n日志收到后，另行上传车载流量、车机设置的 APK 和 ODEX，以及系统框架资源。服务器已有的相同文件会直接关联。";
         }
         if (includeCarLife) {
-            message += "\n\n日志收到后，另行传送原厂百度 CarLife 的 APK 及可读取的同名 ODEX。安装包内置的库会随 APK 一起传送。";
+            message += "\n\n日志收到后，另行向维护者的服务器传送原厂百度 CarLife 的 APK 及可读取的同名 ODEX，用于分析方向盘按键。";
         }
         message += "\n\n车机会清理本次已确认收到的本地日志。";
         new AlertDialog.Builder(activity).setTitle("确认提交日志")
@@ -1421,8 +1421,12 @@ final class CompatibilityTools {
 
     private static void putNumber(JSONObject out, JSONObject tokens, String source, String target) throws Exception {
         if (!tokens.has(source) || out.has(target)) return;
-        try { long value = Long.parseLong(tokens.optString(source)); if (value >= 0 && value <= 1000000000L) out.put(target, value); }
-        catch (NumberFormatException ignored) { }
+        try {
+            long value = Long.parseLong(tokens.optString(source));
+            // The ALSA bridge can return a negated Linux errno.
+            long minimum = "errno".equals(source) ? -4095L : 0L;
+            if (value >= minimum && value <= 1000000000L) out.put(target, value);
+        } catch (NumberFormatException ignored) { }
     }
 
     private static JSONObject readCatalog(MainActivity activity, int installedVersionCode) throws Exception {

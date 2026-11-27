@@ -1,13 +1,36 @@
 package local.headunit.diplay
 
+import android.content.Context
+import android.media.AudioManager
+
 /** CarPlay roles remain distinct even when an OEM exposes only one Android output. */
 object LegacyAudioPolicy {
- /** Only non-BYD fallback devices use Android's phone strategy. BYD CarPlay stays on its active MCU source. */
+ enum class CallRoute(
+  val outputStream:Int,
+  val platformPhoneStrategy:Boolean,
+  val maximizeVolume:Boolean,
+  val diagnosticProfile:String
+ ) {
+  BYD_MX9A0_MEDIA(AudioManager.STREAM_MUSIC,false,true,"byd_mx9a0_media"),
+  BYD_SAH_MX9_MEDIA(AudioManager.STREAM_MUSIC,false,false,"byd_sah_mx9_410_media"),
+  DEFAULT_MEDIA(AudioManager.STREAM_MUSIC,false,false,"default_media")
+ }
+
+ @JvmStatic fun resolveCallRoute(context:Context,secondMusic:Int):CallRoute =
+  selectCallRoute(secondMusic,secondMusic!=10 && SahMx9CallProfile.matches(context))
+
+ internal fun selectCallRoute(secondMusic:Int,sahMx9:Boolean):CallRoute = when {
+  secondMusic==10 -> CallRoute.BYD_MX9A0_MEDIA
+  sahMx9 -> CallRoute.BYD_SAH_MX9_MEDIA
+  else -> CallRoute.DEFAULT_MEDIA
+ }
+
+ /** Only used by a route that explicitly selects Android's phone strategy. */
  @JvmStatic fun callMode():Int=android.media.AudioManager.MODE_IN_CALL
  @JvmStatic fun callSpeakerphone():Boolean=true
- /** BYD CarPlay phone PCM is rendered on the same Android media output as CarPlay music. */
+ /** CarPlay call focus uses the same stream as call playback. */
  @JvmStatic fun callFocusStream(secondMusic:Int):Int=stream("call",secondMusic)
- @JvmStatic fun usesPlatformPhoneStrategy(secondMusic:Int):Boolean=secondMusic!=10
+ @JvmStatic fun usesPlatformPhoneStrategy(secondMusic:Int):Boolean=selectCallRoute(secondMusic,false).platformPhoneStrategy
  @JvmStatic fun usesClientCallFocus(secondMusic:Int):Boolean=true
  @JvmStatic fun role(type:Int,kind:String):String=when(kind.lowercase(java.util.Locale.US)) {
   "telephony" -> "call"
@@ -20,7 +43,7 @@ object LegacyAudioPolicy {
   // Do not select SOURCE_BLUETOOTH_PHONE (13): that MCU source expects BT HFP
   // audio, while CarPlay telephony arrives as PCM over the wired AirPlay stream.
   // Preserve the current MCU source and render the PCM on Android's media stream.
-  "call" -> if(secondMusic==10)android.media.AudioManager.STREAM_MUSIC else android.media.AudioManager.STREAM_VOICE_CALL
+  "call" -> selectCallRoute(secondMusic,false).outputStream
   "navigation" -> if(secondMusic==10)10 else android.media.AudioManager.STREAM_MUSIC
   else -> android.media.AudioManager.STREAM_MUSIC
  }

@@ -390,15 +390,45 @@ class WiredService:Service() {
    recordRuntimeLink("bluetooth_handoff_worker_failed","error=${error.javaClass.simpleName}")
   }
  }}
- private data class BootPeerCandidate(val prefs:SharedPreferences,val key:String,val value:String)
+ private data class BootPeerCandidate(val prefs:SharedPreferences,val savedKey:String,val verifiedKey:String,val value:String)
  private var bootPeerCandidate:BootPeerCandidate?=null // protected by resourceLock
+ private var expectedAirPlayController:String?=null // set before accepting and pinned under resourceLock on first frame
+ private var otherAirPlayControllers=emptySet<String>() // assigned before accept workers start
+ private val unavailablePhones=LinkedHashSet<String>() // initialized and filled by the connect worker
+ private var continuingPhoneSelection=false
+ private var phoneForAlternateRetry:String?=null // used only before the first projection
+ private var previousAirPlayControllerIgnored=false // protected by resourceLock
+
+ private fun peerControllerKey(verifiedKey:String,address:String)="$verifiedKey.peer.${address.uppercase(Locale.US)}.controller"
+
+ private fun matchesAirPlayController(current:AirPlaySession):Boolean =
+  WirelessPhoneReconnect.matchesAirPlayController(current.controllerId,expectedAirPlayController,otherAirPlayControllers)
+
+ private fun selectedAirPlayResponding():Boolean=synchronized(resourceLock){
+  sessions.any{!it.isClosed&&matchesAirPlayController(it)&&it.hasReceivedControl()}
+ }
 
  private fun confirmBootPeerIfProjected(current:AirPlaySession){
   val candidate=bootPeerCandidate?:return
-  if(current.controllerId==null||!current.hasRenderedVideo)return
+  val controller=current.controllerId?:return
+  if(!current.hasRenderedVideo)return
+  expectedAirPlayController=controller
   bootPeerCandidate=null
-  if(candidate.prefs.getString(candidate.key,null)!=candidate.value){
-   candidate.prefs.edit().putString(candidate.key,candidate.value).apply()
+  val controllerKey="${candidate.verifiedKey}.controller"
+  val previousRecord=candidate.prefs.getString(candidate.verifiedKey,null)
+  val previousController=candidate.prefs.getString(controllerKey,null)
+  val projectedPhone=candidate.value.substringAfter('|')
+  val peerKey=peerControllerKey(candidate.verifiedKey,projectedPhone)
+  if(previousRecord!=candidate.value||
+     candidate.prefs.getString(candidate.savedKey,null)!=candidate.value||
+     previousController!=controller||candidate.prefs.getString(peerKey,null)!=controller){
+   val edit=candidate.prefs.edit()
+   val previousPeer=WirelessPhoneReconnect.choose(previousRecord,candidate.value.substringBefore('|'),false).remembered
+   if(previousPeer!=null&&previousController!=null&&!previousPeer.equals(projectedPhone,true)){
+    edit.putString(peerControllerKey(candidate.verifiedKey,previousPeer),previousController)
+   }
+   edit.putString(candidate.savedKey,candidate.value).putString(candidate.verifiedKey,candidate.value)
+    .putString(controllerKey,controller).putString(peerKey,controller).apply()
    recordPhoneConnection("projected_peer_verified")
   }
  }
@@ -707,7 +737,18 @@ class WiredService:Service() {
  }
  private val listener=object:AirPlaySessionListener {
   override fun claimProjection(session:AirPlaySession):Boolean=synchronized(resourceLock){
-   if(closed||session.isClosed||!sessions.contains(session))return@synchronized false
+   if(closed||failed.get()||session.isClosed||!sessions.contains(session))return@synchronized false
+   // Preflight can run in parallel, but a retained session cannot take over before Bluetooth iAP2 is ready.
+   if(!runtimePeerVerified)return@synchronized false
+   if(!matchesAirPlayController(session)){
+    if(!previousAirPlayControllerIgnored){
+     previousAirPlayControllerIgnored=true
+     recordPhoneConnection("previous_airplay_controller_ignored")
+    }
+    // Release a stale authenticated session's slot without stopping the new phone's listener.
+    runCatching{watchdog.execute{session.close()}}
+    return@synchronized false
+   }
    val recovery=wifiRecovery
    if(recovery!=null&&(session.remoteAddress!=recovery.peer||session.controllerId!=recovery.controllerId))return@synchronized false
    if(projectionOwner!=null&&projectionOwner!==session)return@synchronized false
@@ -757,7 +798,7 @@ class WiredService:Service() {
    if(closed)return
    val protocolFailed=session.protocolFailure!=null
    if(wasActive){
-    val lostTransport=videoReady&&session.runtimeEvidence().transportIoFailure
+    val lostTransport=session.runtimeEvidence().transportIoFailure
     if(videoReady)captureRuntimeHotspot(when{
      session.isClosingNormally -> "session_ended_normal"
      lostTransport -> "session_ended_transport_io"
@@ -780,7 +821,13 @@ class WiredService:Service() {
     runCatching{watchdog.schedule({
      synchronized(resourceLock){
       if(!closed&&sessionGeneration==endedGeneration&&this@WiredService.session==null){
-       if(lostTransport)fail(IOException("iPhone 投屏控制连接已断开"),"wireless_transport_io",allowRuntimeRetry=true)
+       if(lostTransport){
+        val failure=IOException("iPhone 投屏控制连接已断开")
+        val wifi=runtimeHotspot
+        if(wifi==null||!tryAlternatePhone(failure,"wireless_transport_io",wifi)){
+         fail(failure,"wireless_transport_io",allowRuntimeRetry=true)
+        }
+       }
        else fail(IOException("session ended"),"airplay_session_ended")
       }
      }
@@ -852,7 +899,8 @@ class WiredService:Service() {
    else -> stage
   }
   try{MainActivity.record(this,eventType,JSONObject().put("detail",detail.take(1200)).put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}}
- fun note(stage:String,text:String,bootRetryable:Boolean=false,runtimeRetryDevice:UsbDevice?=null){
+ fun note(stage:String,text:String,bootRetryable:Boolean=false,runtimeRetryDevice:UsbDevice?=null,
+          unavailableOnRetry:ArrayList<String>?=null){
   progressStage=stage;progressMessage=text
   if(stage=="PHONE_START"&&text.startsWith("PHONE_PROBE http://"))activeProbeUrl=text.substring("PHONE_PROBE ".length).trim()
   else if(stage=="AIRPLAY_HANDSHAKE"||stage=="AIRPLAY_ACTIVE"||stage=="VIDEO_READY"||stage=="FAILED"||stage=="DISCONNECTED"||stage=="STOPPED")activeProbeUrl=null
@@ -862,6 +910,8 @@ class WiredService:Service() {
    .putExtra("message",text).putExtra("stage",stage).putExtra("connection_id",connectionId)
    .putExtra("boot_retryable",bootRetryable)
   if(runtimeRetryDevice!=null)update.putExtra("runtime_retry_device",runtimeRetryDevice)
+  if(unavailableOnRetry!=null)update.putStringArrayListExtra(MainActivity.EXTRA_UNAVAILABLE_IPHONES,unavailableOnRetry)
+    .putExtra("request_started_at",requestStartedAt)
   sendBroadcast(update)
  }
  private fun safeDiagnosticType(t:Throwable):String { val value=t.javaClass.simpleName.replace(Regex("[^A-Za-z0-9_]"),"").take(48);return value.ifEmpty{"Throwable"} }
@@ -910,7 +960,7 @@ class WiredService:Service() {
   MainActivity.record(this,"CONNECTION_FAILURE",details)
  }catch(_:Throwable){}}
  private fun fail(e:Throwable,origin:String="connect_worker",retryPhone:Boolean=false,
-                   allowRuntimeRetry:Boolean=false,runtimeSummary:String?=null){
+                   allowRuntimeRetry:Boolean=false,runtimeSummary:String?=null,unavailableOnRetry:ArrayList<String>?=null){
   if(closed||!failed.compareAndSet(false,true))return
   if(videoReady)captureRuntimeHotspot("failure_$origin")
   recordFailure(e,origin,runtimeSummary)
@@ -919,8 +969,18 @@ class WiredService:Service() {
   while(cause!=null&&chain.size<4){
    chain.add(cause.javaClass.simpleName+": "+(cause.message?:"connection failed").take(160));cause=cause.cause
   }
-  val retryDevice=usbBtDevice?.takeIf{allowRuntimeRetry&&videoReady&&runtimePeerVerified}
-  try{note("FAILED",chain.joinToString(" → "),bootAutoConnect&&retryPhone&&!videoReady,retryDevice)}finally{shutdown()}
+  val retryDevice=usbBtDevice?.takeIf{unavailableOnRetry!=null||(allowRuntimeRetry&&videoReady&&runtimePeerVerified)}
+  try{note("FAILED",chain.joinToString(" → "),bootAutoConnect&&retryPhone&&!videoReady,retryDevice,unavailableOnRetry)}finally{shutdown()}
+ }
+
+ private fun tryAlternatePhone(e:IOException,origin:String,wifi:HybridNetworkSnapshot):Boolean=synchronized(resourceLock){
+  val phone=phoneForAlternateRetry?:return@synchronized false
+  if(closed||failed.get()||videoReady||session!=null||projectionOwner!=null||selectedAirPlayResponding()||
+      !WirelessPhoneReconnect.canContinueSelection(requestStartedAt,SystemClock.elapsedRealtime())||
+      runCatching{currentWirelessBinding(wifi,verifyIpv6=false)}.isFailure)return@synchronized false
+  recordPhoneConnection("retry_other_bonded_phone",source=origin)
+  fail(e,origin,unavailableOnRetry=ArrayList(unavailablePhones+phone))
+  true
  }
  private fun wifiHandoffFailure(detail:String,cause:IOException):IOException {
   if(useP2p)return IOException("P2P_CONNECTION_FAILED ${detail}请保持 iPhone 的蓝牙和 Wi-Fi 已开启，并提交日志。",cause)
@@ -1083,6 +1143,9 @@ class WiredService:Service() {
   }},180,TimeUnit.SECONDS)
   val notification=Notification.Builder(this).setSmallIcon(android.R.drawable.stat_sys_upload).setContentTitle("DiPlay CarPlay").setContentText("正在连接，可在应用内停止").build();startForeground(1702,notification)
   val reselectPhone=i?.getBooleanExtra(MainActivity.EXTRA_RESELECT_PHONE,false)==true
+  if(!reselectPhone)i?.getStringArrayListExtra(MainActivity.EXTRA_UNAVAILABLE_IPHONES).orEmpty()
+   .filterTo(unavailablePhones,WirelessPhoneReconnect::isBluetoothAddress)
+  continuingPhoneSelection=unavailablePhones.isNotEmpty()
   bootAutoConnect=i?.getBooleanExtra("boot_auto_connect",false)==true&&!reselectPhone
   runtimeReconnect=i?.getBooleanExtra("runtime_reconnect",false)==true&&!reselectPhone
   try{work.execute{synchronized(resourceLock){if(closed)return@execute;connectingWorkers.incrementAndGet()};try{connect(reselectPhone)}catch(e:Throwable){
@@ -1138,32 +1201,86 @@ class WiredService:Service() {
    MainActivity.record(this,"USB_BT_STACK",row)
   }catch(_:Exception){}
  }
+ private fun discoverPhone(btStack:UsbBtHostStack,source:String):String{
+  phase("bluetooth_phone_inquiry")
+  note("BT_PHONE_INQUIRY","请在 iPhone 上打开「设置 → 蓝牙」，车机正在搜索。")
+  recordPhoneConnection("active_inquiry_requested",source=source)
+  val phones=btStack.discoverPhones(22000L)
+  recordPhoneConnection("active_inquiry_results",phones.size)
+  if(phones.isEmpty())throw IOException("未搜到 iPhone。保持手机「设置 → 蓝牙」页面打开，再重试。")
+  phase("bluetooth_phone_select")
+  note("BT_PHONE_SELECT","请在车机上选择你的 iPhone。")
+  val labels=phones.mapIndexed{i,peer->
+   val name=peer.name.ifBlank{"手机（未广播名称）"}
+   if(phones.size==1)name else "${i+1}. $name"
+  }.toTypedArray()
+  val selected=MainActivity.chooseUsbBluetoothPeer(labels,60000L,java.util.concurrent.Callable{closed})
+  if(closed)throw InterruptedException("Connection cancelled")
+  if(selected !in phones.indices)throw IOException("未选择 iPhone。请打开车机应用并点「连接」重试。")
+  return phones[selected].address
+ }
+
  private fun connectToPhone(btStack:UsbBtHostStack,selection:WirelessPhoneReconnect.Selection):String{
   val remembered=selection.remembered
-  val address=if(remembered!=null)remembered else {
-   phase("bluetooth_phone_inquiry")
-   note("BT_PHONE_INQUIRY","请在 iPhone 上打开「设置 → 蓝牙」，车机正在搜索。")
-   recordPhoneConnection("active_inquiry_requested",source=selection.reason)
-   val phones=btStack.discoverPhones(22000L)
-   recordPhoneConnection("active_inquiry_results",phones.size)
-   if(phones.isEmpty())throw IOException("未搜到 iPhone。保持手机「设置 → 蓝牙」页面打开，再重试。")
-   phase("bluetooth_phone_select")
-   note("BT_PHONE_SELECT","请在车机上选择你的 iPhone。")
-   val labels=phones.mapIndexed{i,peer->
-    val name=peer.name.ifBlank{"手机（未广播名称）"}
-    if(phones.size==1)name else "${i+1}. $name"
-   }.toTypedArray()
-   val selected=MainActivity.chooseUsbBluetoothPeer(labels,60000L,java.util.concurrent.Callable{closed})
-   if(closed)throw InterruptedException("Connection cancelled")
-   if(selected !in phones.indices)throw IOException("未选择 iPhone。请打开车机应用并点「连接」重试。")
-   phones[selected].address
+   ?:return connectPhonePeer(btStack,discoverPhone(btStack,selection.reason),remembered=false)
+  try{
+   return connectPhonePeer(btStack,remembered,remembered=true)
+  }catch(failure:IOException){
+   val outbound=failure as? UsbBtHostStack.OutboundFailure
+   if(bootAutoConnect||runtimeReconnect||benchmarkConnection||outbound==null||
+      !WirelessPhoneReconnect.shouldDiscoverAfterPageFailure(outbound.stage,outbound.status)){
+    throw IOException("BT_RESELECT_PHONE 已保存的 iPhone 未能连接。请检查它的蓝牙是否开启。",failure)
+   }
+   check()
+   recordPhoneConnection("remembered_phone_unreachable",source="manual_fallback",status=outbound.status)
   }
+  return connectPhonePeer(btStack,discoverPhone(btStack,"remembered_phone_unreachable"),remembered=false)
+ }
+
+ private fun tryBondedPhones(btStack:UsbBtHostStack,phones:List<String>,preferred:String?,allowIncoming:Boolean):String?{
+  if(phones.isEmpty())return null
   phase("bluetooth_phone_connect")
-  val source=if(remembered!=null)"remembered" else "selected"
+  note("BT_PHONE_RECONNECT","正在自动连接已配对的 iPhone。")
+  if(allowIncoming&&phones.size==1){
+   val phone=phones.single()
+   return phone.takeIf{btStack.tryRememberedPeer(it,4500L)}
+  }
+  for(phone in phones){
+   check()
+   val source=if(phone.equals(preferred,ignoreCase=true))"last_projected" else "other_bonded"
+   recordPhoneConnection("bonded_phone_attempt",candidateCount=phones.size,source=source)
+   // The controller bounds paging separately. Leave the existing RFCOMM budget
+   // available once a phone answers, including its security and service discovery.
+   var retries=0
+   var finalFailure:UsbBtHostStack.OutboundFailure?
+   while(true){
+    val started=SystemClock.elapsedRealtime()
+    if(btStack.tryRememberedPeer(phone,80000L))return phone
+    finalFailure=btStack.lastRememberedFailure()
+    val retryMs=finalFailure?.let{
+     WirelessPhoneReconnect.retryDelayMs(it.stage,it.status,true,retries,SystemClock.elapsedRealtime()-started)
+    }?:0L
+    if(retryMs==0L)break
+    retries++
+    Thread.sleep(retryMs)
+    check()
+   }
+   if(finalFailure==null||!WirelessPhoneReconnect.canTryNextBondedPhone(finalFailure.stage,finalFailure.status)){
+    throw IOException("BT_RESELECT_PHONE 已配对的 iPhone 未能完成蓝牙连接。",finalFailure)
+   }
+   unavailablePhones.add(phone)
+   recordPhoneConnection("bonded_phone_unavailable",source=source,status=finalFailure.status)
+  }
+  return null
+ }
+
+ private fun connectPhonePeer(btStack:UsbBtHostStack,address:String,remembered:Boolean):String{
+  phase("bluetooth_phone_connect")
+  val source=if(remembered)"remembered" else "selected"
   var retries=0
   while(true){
    check()
-   if(remembered==null)note("BT_PHONE_CONNECT","车机正在连接 iPhone。首次配对时请确认手机上弹出的请求。")
+   if(!remembered)note("BT_PHONE_CONNECT","车机正在连接 iPhone。首次配对时请确认手机上弹出的请求。")
    else note("BT_PHONE_RECONNECT","正在连接已保存的 iPhone。")
    recordPhoneConnection("active_connect_requested",source=source,retries=retries)
    val attemptStartedAt=SystemClock.elapsedRealtime()
@@ -1175,12 +1292,9 @@ class WiredService:Service() {
     val outbound=failure as? UsbBtHostStack.OutboundFailure
     val attemptElapsedMs=SystemClock.elapsedRealtime()-attemptStartedAt
     val retryMs=outbound?.let{
-     WirelessPhoneReconnect.retryDelayMs(it.stage,it.status,remembered!=null,retries,attemptElapsedMs)
+     WirelessPhoneReconnect.retryDelayMs(it.stage,it.status,remembered,retries,attemptElapsedMs)
     }?:0L
-    if(retryMs==0L){
-     if(remembered!=null)throw IOException("BT_RESELECT_PHONE 已保存的 iPhone 未能连接。请检查它的蓝牙是否开启。",failure)
-     throw failure
-    }
+    if(retryMs==0L)throw failure
     retries++
     note("BT_PHONE_RETRY","蓝牙正在结束上一个连接操作，即将重试当前 iPhone。")
     recordPhoneConnection("active_connect_retry_wait",source=source,retries=retries,retryInMs=retryMs,status=outbound?.status)
@@ -1232,7 +1346,7 @@ class WiredService:Service() {
   val bluetoothName=MainActivity.bluetoothName(this)
   val eirProfile=MainActivity.bluetoothEirProfile(this)
   val ats2851=UsbBluetoothProbe.isKnownAts2851(currentBt.vendorId,currentBt.productId)
-  val activePhoneConnect=ats2851||runtimeReconnect
+  val activePhoneConnect=ats2851||runtimeReconnect||reselectPhone
   val carplayDiscovery=ats2851&&!activePhoneConnect&&eirProfile==1
   val discoveryStrategy=when {
    activePhoneConnect -> "active_iphone"
@@ -1312,17 +1426,28 @@ class WiredService:Service() {
   val peerPreference=MainActivity.PREF_USB_BT_PEER+"."+dongleMac.uppercase(Locale.US)
   val verifiedPreference="$peerPreference.verified"
   val verifiedRecord=hybridPrefs.getString(verifiedPreference,null)
-  val savedPeer=hybridPrefs.getString(peerPreference,null)?:hybridPrefs.getString(MainActivity.PREF_USB_BT_PEER,null)
-  val selection=WirelessPhoneReconnect.choose(savedPeer,dongleMac,reselectPhone)
-  if(runtimeReconnect&&selection.remembered==null)throw IOException("找不到这只适配器已确认的 iPhone，请手动连接。")
+  val savedPeer=hybridPrefs.getString(peerPreference,null)
+  val legacyPeer=hybridPrefs.getString(MainActivity.PREF_USB_BT_PEER,null)
+  val selection=WirelessPhoneReconnect.chooseForAdapter(verifiedRecord,savedPeer,legacyPeer,dongleMac,reselectPhone)
   if(benchmarkConnection&&selection.remembered==null)throw IOException("画面检测需要已确认的 iPhone。")
-  val preferred=WirelessPhoneReconnect.choose(verifiedRecord,dongleMac,reselectPhone).remembered
-  val selectedPhone=when{
-   activePhoneConnect->{
-    btStack.allowPhoneConnections()
-    connectToPhone(btStack,selection)
-   }
-   rtlFirmwareCandidate&&preferred!=null&&btStack.tryRememberedPeer(preferred,4500L)->preferred
+  val lastProjected=WirelessPhoneReconnect.choose(verifiedRecord,dongleMac,reselect=false).remembered
+  val preferred=if(reselectPhone)null else lastProjected
+  val bonded=if(reselectPhone||benchmarkConnection)emptyList() else
+   WirelessPhoneReconnect.bondedCandidates(preferred?:selection.remembered,btStack.bondedPeerAddresses(),unavailablePhones)
+  if(continuingPhoneSelection&&bonded.isEmpty()){
+   throw IOException("BT_RESELECT_PHONE 没有其他已配对的 iPhone 可供连接。")
+  }
+  if(runtimeReconnect&&selection.remembered==null&&bonded.isEmpty()){
+   throw IOException("找不到这只适配器已确认的 iPhone，请手动连接。")
+  }
+  if(activePhoneConnect)btStack.allowPhoneConnections()
+  val selectedPhone=tryBondedPhones(btStack,bonded,preferred?:selection.remembered,allowIncoming=!activePhoneConnect)?:when{
+   activePhoneConnect&&bonded.isNotEmpty()&&(bootAutoConnect||runtimeReconnect)->
+    throw IOException("BT_RESELECT_PHONE 暂时无法连接已配对的 iPhone。",btStack.lastRememberedFailure())
+   activePhoneConnect&&bonded.isNotEmpty()->
+    connectPhonePeer(btStack,discoverPhone(btStack,"bonded_phones_unavailable"),remembered=false)
+   activePhoneConnect->connectToPhone(btStack,selection)
+   benchmarkConnection&&rtlFirmwareCandidate&&preferred!=null&&btStack.tryRememberedPeer(preferred,4500L)->preferred
    else->{
     check()
     btStack.allowPhoneConnections()
@@ -1335,13 +1460,18 @@ class WiredService:Service() {
    throw IOException("画面检测连接到了不同的蓝牙设备。")
   }
   usbLinked=true
-  val confirmedPhone=WirelessPhoneReconnect.confirmedRecord(dongleMac,selectedPhone,rfcommPeerAddress)
-  val rememberedPhoneConfirmed=selection.remembered!=null&&confirmedPhone!=null
-  confirmedPhone?.let{record->
-   if(hybridPrefs.getString(peerPreference,null)!=record){
-    hybridPrefs.edit().putString(peerPreference,record).apply()
-    recordPhoneConnection("active_rfcomm_peer_remembered")
-   }
+  val confirmedPhone=WirelessPhoneReconnect.confirmedRecord(dongleMac,selectedPhone?:rfcommPeerAddress,rfcommPeerAddress)
+  val rememberedPhoneConfirmed=confirmedPhone!=null&&selection.remembered!=null&&
+   selection.remembered.equals(rfcommPeerAddress,ignoreCase=true)
+  if(confirmedPhone!=null&&rfcommPeerAddress!=null){
+   if(bonded.any{it.equals(rfcommPeerAddress,true)}&&
+      bonded.any{!it.equals(rfcommPeerAddress,true)&&it !in unavailablePhones})phoneForAlternateRetry=rfcommPeerAddress
+   val ownController=hybridPrefs.getString(peerControllerKey(verifiedPreference,rfcommPeerAddress),null)
+    ?:if(lastProjected.equals(rfcommPeerAddress,ignoreCase=true))hybridPrefs.getString("$verifiedPreference.controller",null) else null
+   expectedAirPlayController=ownController.takeUnless{reselectPhone}
+   otherAirPlayControllers=WirelessPhoneReconnect.otherKnownControllers(
+    hybridPrefs.all,MainActivity.PREF_USB_BT_PEER,rfcommPeerAddress,
+   ).filterNot{it==ownController}.toSet()
   }
   log("USB_BT_STACK","stage=rfcomm_connected addressPresent=${rfcommPeerAddress!=null} bluetoothElapsedMs=${SystemClock.elapsedRealtime()-btStartAt}")
   try{MainActivity.record(this,"USB_BT_STACK",JSONObject().put("stage","rfcomm_connected").put("rfcommConnected",true).put("addressPresent",rfcommPeerAddress!=null).put("bluetoothElapsedMs",SystemClock.elapsedRealtime()-btStartAt).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Throwable){}
@@ -1366,7 +1496,15 @@ class WiredService:Service() {
   phase("iap2_setup")
   note("CARKIT","蓝牙通道已打开，正在与 iPhone 建立 iAP2。")
   val csm=openWirelessIap2()
-  if(!csm.awaitReady(12000L))throw IOException("已连接 iPhone 蓝牙，但 iAP2 握手未完成。")
+  val iap2Ready=try{csm.awaitReady(12000L)}catch(error:IOException){
+   if(btStack.hasPhoneDisconnected()&&tryAlternatePhone(error,"iap2_setup",hotspot))return
+   throw error
+  }
+  if(!iap2Ready){
+   val error=IOException("已连接 iPhone 蓝牙，但 iAP2 握手未完成。")
+   if(tryAlternatePhone(error,"iap2_setup",hotspot))return
+   throw error
+  }
   synchronized(resourceLock){
    check()
    bluetoothBootstrapStop={
@@ -1572,20 +1710,18 @@ class WiredService:Service() {
    ident,endpoint,timeoutMillis=45000L,alternateEndpoint=alternateEndpoint,
    canInviteOverBluetooth={
     !closed&&session==null&&!handoff.tunnelReady&&!wifiRecoveryInProgress()&&
-     (!startSent.get()||sessions.none{it.hasReceivedControl()})
+     (!startSent.get()||!selectedAirPlayResponding())
    },
    keepAliveAfterDeadline={session!=null||handoff.tunnelReady||wifiRecoveryInProgress()},
    onReady={
     if(!closed){
-     val peer=WirelessPhoneReconnect.confirmedRecord(dongleMac,selectedPhone?:rfcommPeerAddress,rfcommPeerAddress)
-     if(peer!=null){
-      if(hybridPrefs.getString(peerPreference,null)!=peer)hybridPrefs.edit().putString(peerPreference,peer).apply()
+     if(confirmedPhone!=null){
       synchronized(resourceLock){
        if(!closed){
         runtimePhoneBluetooth=rfcommPeerAddress?:selectedPhone
         runtimePeerVerified=true
         maybeReleaseBluetoothBootstrap()
-        bootPeerCandidate=BootPeerCandidate(hybridPrefs,verifiedPreference,peer)
+        bootPeerCandidate=BootPeerCandidate(hybridPrefs,peerPreference,verifiedPreference,confirmedPhone)
         session?.let(::confirmBootPeerIfProjected)
        }
       }
@@ -1658,6 +1794,7 @@ class WiredService:Service() {
    },
   )}catch(error:IOException){
    if(bluetoothHandoffKeepsWifi())return
+   if(btStack.hasPhoneDisconnected()&&tryAlternatePhone(error,"iap2_phone_disconnected",wifi))return
    throw error
   }
   if(bluetoothHandoffKeepsWifi())return
@@ -1665,7 +1802,7 @@ class WiredService:Service() {
   try{MainActivity.record(this,"HYBRID_CONTROL_END",JSONObject().put("terminal",result.terminal.name.lowercase(Locale.US)).put("stage",result.stage.name.lowercase(Locale.US)).put("iap2Profile",hybridProfile).put("usbHostGroup16Enabled",ident.usbHostTransportComponentEnabled).put("bluetoothGroup17Enabled",advertiseBluetoothComponent).put("wifiCredentialsIncluded",includeWifiCredentials).put("addressCount",listeners.size).put("ipv6ListenerAvailable",ipv6ListenerAvailable).put("apBssidPresent",wifi.apBssid!=null).put("probeHitCount",returnPathProbe?.hitCount?:0).put("carPlayStartSessionsSent",result.carPlayStartSessionsSent).put("wifiConfigurationsSent",result.wifiConfigurationsSent).put("transportNotificationSeen",result.transportNotificationSeen).put("wirelessCarPlayAvailableSeen",result.wirelessCarPlayAvailableSeen).put("airplayTcpAccepted",airplayTcpAccepted.get()).put("sessionCount",sessions.size).put("videoReady",videoReady).put("tunnelOpen",handoff.tunnelReady).put("usbLinked",usbLinked).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Throwable){}
   try{MainActivity.record(this,"HYBRID_MDNS_STATE",JSONObject().put("stage","control_end_snapshot").put("diagnosticSummary",handoff.diagnosticSnapshot()).put("tunnelOpen",handoff.tunnelReady).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Throwable){}
   fun canRetryHandoff():Boolean=bootAutoConnect&&rememberedPhoneConfirmed&&startSent.get()&&
-   !videoReady&&session==null&&sessions.none{it.hasReceivedControl()}&&
+   !videoReady&&session==null&&!selectedAirPlayResponding()&&
    runCatching{currentWirelessBinding(wifi,verifyIpv6=true)}.isSuccess
   if(!closed&&result.terminal==Iap2WirelessControlTerminal.TIMED_OUT){
    recordPeer("handoff_timed_out",peerEvidence.sample())
@@ -1675,7 +1812,13 @@ class WiredService:Service() {
     wifiHandoffFailure(if(useP2p)"尚未收到 iPhone 通过 Wi-Fi Direct 发起的投屏连接。"
       else "尚未收到 iPhone 通过车载热点发起的投屏连接。",timeout)
    else timeout
-   fail(failure,"phone_projection_start",canRetryHandoff());return
+   val retry=canRetryHandoff()
+   synchronized(resourceLock){
+    // RECORD can finish after the control loop times out, while diagnostics are collected.
+    if(closed||videoReady||session?.isClosed==false||wifiRecoveryInProgress())return
+    if(!tryAlternatePhone(failure,"phone_projection_start",wifi))fail(failure,"phone_projection_start",retry)
+   }
+   return
   }
   if(!closed&&result.terminal==Iap2WirelessControlTerminal.CHANNEL_CLOSED){
    usbLinked=false
@@ -1705,7 +1848,7 @@ class WiredService:Service() {
      invited -> IOException("蓝牙控制通道关闭后，iPhone 未完成 Wi-Fi 投屏接续。")
      else -> IOException("蓝牙控制通道在投屏启动前关闭。")
     }
-    fail(failure,"wifi_handoff_after_rfcomm_close",retry)
+    if(!tryAlternatePhone(failure,"wifi_handoff_after_rfcomm_close",wifi))fail(failure,"wifi_handoff_after_rfcomm_close",retry)
    }
    return
   }

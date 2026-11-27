@@ -81,10 +81,10 @@ class UsbBtPairingAgent(
     }
 
     private val running = AtomicBoolean(false)
-    private var executor: java.util.concurrent.ExecutorService? = null
+    @Volatile private var executor: java.util.concurrent.ExecutorService? = null
 
     /** Start the pairing agent. Idempotent. */
-    fun start() {
+    @Synchronized fun start() {
         if (!running.compareAndSet(false, true)) return
         executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "UsbBtPairing").apply { isDaemon = true }
@@ -92,8 +92,8 @@ class UsbBtPairingAgent(
         UsbBtLog.log(context, TAG, "pairing agent started")
     }
 
-    fun stop() {
-        if (!running.compareAndSet(false, true)) return
+    @Synchronized fun stop() {
+        if (!running.compareAndSet(true, false)) return
         executor?.shutdownNow()
         executor = null
         UsbBtLog.log(context, TAG, "pairing agent stopped")
@@ -121,6 +121,7 @@ class UsbBtPairingAgent(
                          event.code == EVT_LINK_KEY_NOTIFICATION) &&
                         bdAddrFrom(event).equals(bondedOnlyPeer, ignoreCase = true)
                     worker.execute {
+                        if (worker !== executor || !running.get()) return@execute
                         runCatching {
                             if (existingKeyOnly) rejectNewBond(event)
                             else handleEvent(event)

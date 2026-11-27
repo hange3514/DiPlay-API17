@@ -322,6 +322,7 @@ object HciProtocol {
     const val EVT_SIMPLE_PAIRING_COMPLETE = 0x36
     const val EVT_ENCRYPTION_CHANGE_V2 = 0x59
 
+    const val STATUS_PIN_OR_KEY_MISSING = 0x06
     const val STATUS_COMMAND_DISALLOWED = 0x0c
 
     val OP_INQUIRY = opcode(0x01, 0x0001)

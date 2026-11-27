@@ -12,6 +12,8 @@ public class MainActivity extends Activity {
  static int bluetoothEirProfile(Context context){return context.getSharedPreferences("hybrid_settings",MODE_PRIVATE).getInt(PREF_BT_EIR_PROFILE,0)==1?1:0;}
  static final String PREF_USB_BT_PEER = "usb_bt_remembered_peer";
  static final String EXTRA_RESELECT_PHONE = "reselect_phone";
+ static final String EXTRA_UNAVAILABLE_IPHONES = "unavailable_iphones";
+ private static final String SWITCH_PHONE_ACTION = "更换 iPhone";
 
  private static final class UsbBtPeerChoice {
   private static final int PENDING = -2;
@@ -136,6 +138,7 @@ public class MainActivity extends Activity {
  private enum UsbBtPermissionOperation { CONNECT, CANCELLED }
  private UsbDevice pendingUsbBtDevice, authorizedUsbBtDevice;
  private String runtimeReconnectPreviousId;
+ private ArrayList<String> unavailablePhonesOnReconnect;
  private long runtimeReconnectQueuedAt;
  private UsbBtPermissionOperation pendingUsbBtOperation;
  private PendingIntent usbBtPermissionIntent;
@@ -214,6 +217,7 @@ public class MainActivity extends Activity {
   button(root,"在线更新",new Runnable(){public void run(){CompatibilityTools.checkForUpdate(MainActivity.this);}});
   button(root,"提交日志",new Runnable(){public void run(){CompatibilityTools.open(MainActivity.this);}});
   frameRateButton=button(root,FRAME_RATE_ACTION,new Runnable(){public void run(){showFrameRateDialog();}});
+  button(root,SWITCH_PHONE_ACTION,new Runnable(){public void run(){requestPhoneSwitch();}});
   updateFrameRateButton();
   TextView footer=new TextView(this);footer.setText("\u6295\u5c4f\u65f6\u6309\u8fd4\u56de\u952e\u6253\u5f00\u63a7\u5236\u9762\u677f");footer.setTextSize(11);footer.setTextColor(0xff71869b);footer.setPadding(0,dp(18),0,dp(4));root.addView(footer);
   preview=new ProjectionSurface(this);preview.getHolder().setFixedSize(ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT);controls=new ScrollView(this);controls.setFillViewport(true);controls.setClipToPadding(false);controls.addView(root);FrameLayout outer=new FrameLayout(this);outer.setBackgroundColor(0xff050a12);outer.addView(preview,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));videoBlank=new View(this);videoBlank.setBackgroundColor(0xff050a12);videoBlank.setClickable(false);outer.addView(videoBlank,new FrameLayout.LayoutParams(-1,-1));connectionProgress=new ConnectionProgressView(this);connectionProgress.setVisibility(View.GONE);outer.addView(connectionProgress,new FrameLayout.LayoutParams(-1,-1));
@@ -822,7 +826,8 @@ public class MainActivity extends Activity {
      showOperation("正在处理上一项操作，请稍候");
      return;
     }
-    if (connecting && !(videoReady && ("提交日志".equals(label) || FRAME_RATE_ACTION.equals(label)))) {
+    if (connecting && !SWITCH_PHONE_ACTION.equals(label)
+        && !(videoReady && ("提交日志".equals(label) || FRAME_RATE_ACTION.equals(label)))) {
      showOperation("请先停止连接再操作");
      return;
     }
@@ -979,6 +984,7 @@ public class MainActivity extends Activity {
  private void clearRuntimeReconnect(){
   if(runtimeReconnectPreviousId==null)return;
   runtimeReconnectPreviousId=null;
+  unavailablePhonesOnReconnect=null;
   runtimeReconnectQueuedAt=0;
   authorizedUsbBtDevice=null;
  }
@@ -988,9 +994,11 @@ public class MainActivity extends Activity {
   catch(Exception ignored){}
  }
 
- private boolean enqueueRuntimeReconnect(UsbDevice previous,String previousId,long now){
+ private boolean enqueueRuntimeReconnect(UsbDevice previous,String previousId,long now,ArrayList<String> unavailablePhones,long startedAt){
   if(previous==null||closed)return false;
-  if(lastRuntimeReconnectAt>=0&&now-lastRuntimeReconnectAt<RUNTIME_RECONNECT_COOLDOWN_MS){
+  boolean switchPhone=unavailablePhones!=null&&!unavailablePhones.isEmpty();
+  if(switchPhone&&!WirelessPhoneReconnect.canContinueSelection(startedAt,now))return false;
+  if(!switchPhone&&lastRuntimeReconnectAt>=0&&now-lastRuntimeReconnectAt<RUNTIME_RECONNECT_COOLDOWN_MS){
    recordRuntimeReconnect("retry_skipped","cooldown_active");
    return false;
   }
@@ -1003,23 +1011,28 @@ public class MainActivity extends Activity {
   clearHotspotRecovery();
   reselectPhoneForConnection=false;
   runtimeReconnectPreviousId=previousId;
+  unavailablePhonesOnReconnect=switchPhone?unavailablePhones:null;
+  if(switchPhone)requestStartedAt=startedAt;
   runtimeReconnectQueuedAt=now;
   authorizedUsbBtDevice=current;
-  lastRuntimeReconnectAt=now;
+  if(!switchPhone)lastRuntimeReconnectAt=now;
   connectPending=true;
   connectPendingSince=now;
-  recordRuntimeReconnect("retry_queued","confirmed_runtime_failure");
+  recordRuntimeReconnect("retry_queued",switchPhone?"first_phone_not_projecting":"confirmed_runtime_failure");
   if(connectionProgress!=null)connectionProgress.resetForAttempt();
   setConnectionStage("BT_PHONE_RETRY","正在释放上一次投屏，随后自动重连。");
   setProjectionMode(projectionMode);
   status.setText("正在恢复 CarPlay");
-  showOperation("等上一次连接释放后，将自动重连一次。");
+  showOperation(switchPhone?"正在尝试另一台已配对的 iPhone。":"等上一次连接释放后，将自动重连一次。");
   scheduleConnection(0);
   return true;
  }
 
  private boolean expireRuntimeReconnect(long now){
-  if(runtimeReconnectPreviousId==null||now-runtimeReconnectQueuedAt<CONNECT_QUEUE_TIMEOUT_MS)return false;
+  if(runtimeReconnectPreviousId==null)return false;
+  boolean selectionExpired=unavailablePhonesOnReconnect!=null&&
+      !WirelessPhoneReconnect.canContinueSelection(requestStartedAt,now);
+  if(!selectionExpired&&now-runtimeReconnectQueuedAt<CONNECT_QUEUE_TIMEOUT_MS)return false;
   recordRuntimeReconnect("retry_expired","wait_for_resources");
   resetPermissionConnectionRequest();
   setProjectionMode(false);
@@ -1149,7 +1162,7 @@ public class MainActivity extends Activity {
        })
        .setNeutralButton("搜索其他手机",new DialogInterface.OnClickListener(){
         public void onClick(DialogInterface dialog,int which){
-         checkWifiSetup(WifiPurpose.RESELECT_PHONE);
+         requestPhoneSwitch();
         }
        })
        .setNegativeButton("取消",null)
@@ -1157,6 +1170,28 @@ public class MainActivity extends Activity {
    return;
   }
   checkWifiSetup(WifiPurpose.CONNECT);
+ }
+
+ private void requestPhoneSwitch(){
+  if(closed||busy||maintenance||videoCalibration.isActive())return;
+  if(permissionPending){
+   showOperation("请先完成当前 USB 授权，再更换 iPhone。");
+   return;
+  }
+  if(!connecting&&runtimeReconnectPreviousId==null&&WiredService.currentConnectionId().isEmpty()){
+   checkWifiSetup(WifiPurpose.RESELECT_PHONE);
+   return;
+  }
+  new AlertDialog.Builder(this).setTitle(SWITCH_PHONE_ACTION)
+   .setMessage("当前连接将停止。请在要连接的 iPhone 上打开「设置 → 蓝牙」。")
+   .setPositiveButton("停止并搜索",new DialogInterface.OnClickListener(){
+    public void onClick(DialogInterface dialog,int which){
+     if(closed||busy||maintenance||permissionPending||videoCalibration.isActive())return;
+     cancelUsbBtPeerChoice();
+     stopConnectionCore(false);
+     checkWifiSetup(WifiPurpose.RESELECT_PHONE);
+    }
+   }).setNegativeButton("取消",null).show();
  }
 
  private void enqueueManualConnection(WifiPurpose purpose) {
@@ -1375,6 +1410,7 @@ public class MainActivity extends Activity {
    return; // The resumed activity verifies the same adapter and grant again.
   }
   if(requestStartedAt==0)requestStartedAt=SystemClock.elapsedRealtime();
+  ArrayList<String> unavailablePhones=unavailablePhonesOnReconnect;
   clearRuntimeReconnect();
   boolean reselectPhone=reselectPhoneForConnection;
   currentWifiPurpose=reselectPhone?WifiPurpose.RESELECT_PHONE:WifiPurpose.CONNECT;
@@ -1394,6 +1430,7 @@ public class MainActivity extends Activity {
        .putExtra("request_started_at",requestStartedAt).putExtra("usb_bt_device",usbBtDevice)
         .putExtra(EXTRA_RESELECT_PHONE,reselectPhone).putExtra("boot_auto_connect",autoConnectArmed)
         .putExtra("runtime_reconnect",runtimeReconnect);
+   if(unavailablePhones!=null)launch.putStringArrayListExtra(EXTRA_UNAVAILABLE_IPHONES,unavailablePhones);
    if(benchmarkFps>0)launch.putExtra(WiredService.EXTRA_BENCHMARK_FPS,benchmarkFps);
    startService(launch);
    if(runtimeReconnect)recordRuntimeReconnect("service_launch","same_authorized_adapter");
@@ -1413,11 +1450,13 @@ public class MainActivity extends Activity {
    Object recoveryDevice=intent.getParcelableExtra("runtime_retry_device");
    handleConnectionStatus(intent.getStringExtra("connection_id"),intent.getStringExtra("stage"),
        intent.getStringExtra("message"),intent.getBooleanExtra("boot_retryable",false),
-       recoveryDevice instanceof UsbDevice?(UsbDevice)recoveryDevice:null);
+       recoveryDevice instanceof UsbDevice?(UsbDevice)recoveryDevice:null,
+       intent.getStringArrayListExtra(EXTRA_UNAVAILABLE_IPHONES),intent.getLongExtra("request_started_at",0));
   }
  };
 
- private void handleConnectionStatus(String id,String stage,String message,boolean bootRetryable,UsbDevice recoveryDevice){
+ private void handleConnectionStatus(String id,String stage,String message,boolean bootRetryable,UsbDevice recoveryDevice,
+                                     ArrayList<String> unavailablePhones,long startedAt){
   if(id==null||id.isEmpty()||!id.equals(connectionId)||stage==null)return;
   setConnectionStage(stage,message);
   if("VIDEO_READY".equals(stage)){
@@ -1465,7 +1504,7 @@ public class MainActivity extends Activity {
    return;
   }
   clearBootAutoConnection();
-  if("FAILED".equals(stage)&&enqueueRuntimeReconnect(recoveryDevice,id,now))return;
+  if("FAILED".equals(stage)&&enqueueRuntimeReconnect(recoveryDevice,id,now,unavailablePhones,startedAt))return;
   setProjectionMode(false);
 
   if("FAILED".equals(stage)){

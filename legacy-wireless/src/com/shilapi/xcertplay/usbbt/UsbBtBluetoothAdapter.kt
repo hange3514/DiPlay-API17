@@ -56,6 +56,7 @@ class UsbBtBluetoothAdapter(
         val complete = CountDownLatch(1)
         @Volatile var handle = -1
         @Volatile var status = -1
+        @Volatile var retiring = false
     }
 
     private class Link(val address: String, val handle: Int, val l2cap: L2capLayer) {
@@ -155,8 +156,8 @@ class UsbBtBluetoothAdapter(
     @Throws(IOException::class)
     fun allowPhoneConnections() = synchronized(outgoing) {
         val transport = readyTransport()
-        if (phoneConnectionsAllowed) return@synchronized
         if (preferredCleanupFailed) throw IOException("Previous Bluetooth ACL release was not confirmed")
+        if (phoneConnectionsAllowed) return@synchronized
         val initialized = info ?: throw IOException("USB Bluetooth is not ready")
         val requested = if (outboundOnly) HciProtocol.SCAN_PAGE else HciProtocol.SCAN_INQUIRY_AND_PAGE
         // A controller may report its first connection request just before the write returns.
@@ -188,14 +189,23 @@ class UsbBtBluetoothAdapter(
         }
     }
 
+    fun bondedPeerAddresses(): List<String> {
+        val keys = linkKeys ?: return emptyList()
+        return keys.peers().filter { keys.load(it) != null }
+    }
+
+    fun phoneClosedStream(stream: BlockingDuplexByteStream?): Boolean =
+        (stream as? UsbBtRfcommStream)?.closedByPeer == true
+
     /**
-     * A previously authenticated CM390 peer can page out before scan starts. Incoming pages
-     * stay disabled until the worker returns or is fully retired by its caller.
+     * Probe a bonded peer. The inbound-capable controller keeps scan disabled, while an
+     * outbound-only controller can accept a simultaneous incoming page from that peer alone.
      */
     @Throws(IOException::class, InterruptedException::class)
     fun openRememberedRfcommStream(address: String, uuid: String): BlockingDuplexByteStream? = synchronized(outgoing) {
         val peer = address.uppercase(Locale.US)
-        if (outboundOnly || !deferredPhoneConnections || phoneConnectionsAllowed ||
+        if (preferredCleanupFailed) throw IOException("Previous Bluetooth ACL release was not confirmed")
+        if (!deferredPhoneConnections || (!outboundOnly && phoneConnectionsAllowed) ||
             links.isNotEmpty() || linkKeys?.load(peer) == null) return@synchronized null
         bondedOnlyPeer = peer
         try {
@@ -266,6 +276,7 @@ class UsbBtBluetoothAdapter(
 
     @Throws(IOException::class, InterruptedException::class)
     fun openRfcommStream(address: String, uuid: String): BlockingDuplexByteStream = synchronized(outgoing) {
+        if (preferredCleanupFailed) throw IOException("Previous Bluetooth ACL release was not confirmed")
         val transport = readyTransport()
         val peerAddress = address.uppercase(Locale.US)
         val rawAddress = HciProtocol.encodeBdAddr(peerAddress) ?: throw IOException("Invalid Bluetooth address")
@@ -281,6 +292,8 @@ class UsbBtBluetoothAdapter(
                 when (val result = client.findIap2RfcommChannel()) {
                     is SdpClient.SdpResult.Ok -> result.value
                     is SdpClient.SdpResult.Failed -> throw ConnectionFailure("outbound_sdp_failed", -1, result.reason)
+                    SdpClient.SdpResult.ServiceNotFound ->
+                        throw ConnectionFailure("outbound_sdp_no_iap2_service", -1, "Peer reported no matching iAP2 service")
                 }
             } finally {
                 client.close()
@@ -293,7 +306,7 @@ class UsbBtBluetoothAdapter(
             }
             val rfcomm = RfcommLayer(link.l2cap, bearer)
             link.rfcomm = rfcomm
-            rfcomm.onDlcClosed = { link.stream?.remoteClosed() }
+            rfcomm.onDlcClosed = { link.stream?.end(fromPeer = true) }
             val result = rfcomm.openDlc(channel) { dlc ->
                 link.stream = UsbBtRfcommStream(rfcomm, dlc) { finishOutbound(transport, link, remembered) }
             }
@@ -307,6 +320,9 @@ class UsbBtBluetoothAdapter(
             link.stream ?: throw IOException("Bluetooth RFCOMM receiver was not initialized")
         } catch (failure: Exception) {
             finishOutbound(transport, link, remembered)
+            if (preferredCleanupFailed) {
+                throw ConnectionFailure("outbound_acl_cleanup_failed", -1, "Previous Bluetooth ACL release was not confirmed")
+            }
             throw failure
         }
     }
@@ -330,7 +346,7 @@ class UsbBtBluetoothAdapter(
                 is UsbBtHci.HciResult.Ok -> Unit
             }
             if (!attempt.complete.await(10_000, TimeUnit.MILLISECONDS)) {
-                throw ConnectionFailure("outbound_acl_failed", -1, "Bluetooth ACL connection timed out")
+                throw ConnectionFailure("outbound_acl_wait_timeout", -1, "Bluetooth ACL connection timed out")
             }
             checkOpen()
             if (attempt.status != 0) {
@@ -340,16 +356,29 @@ class UsbBtBluetoothAdapter(
             usableLink = true
             return link
         } finally {
-            val unused = synchronized(linkReady) {
-                aclAttempt = null
-                if (!usableLink && attempt.status == 0) links[attempt.handle] else null
-            }
-            if (!closed.get() && !usableLink && pageMayBePending) {
-                if (unused != null) finishOutbound(transport, unused, remembered)
-                else if (attempt.status < 0 || remembered) {
+            attempt.retiring = true
+            var cancellationFailed = false
+            try {
+                if (!closed.get() && !usableLink && pageMayBePending && attempt.status < 0) {
                     finishBluetoothCleanup {
-                        // Unlock the HCI gate first so a racing late completion never acquires a stream.
-                        transport.sendCommand(HciProtocol.opcode(1, 0x08), rawAddress, timeoutMs = 750)
+                        // Keep the attempt registered so a racing successful page can be retired.
+                        val cancelled = transport.sendCommand(HciProtocol.opcode(1, 0x08), rawAddress, timeoutMs = 750)
+                        cancellationFailed = cancelled is UsbBtHci.HciResult.Failed
+                        if (cancellationFailed && attempt.status < 0) {
+                            attempt.complete.await(250, TimeUnit.MILLISECONDS)
+                        }
+                    }
+                }
+            } finally {
+                val unused = synchronized(linkReady) {
+                    aclAttempt = null
+                    if (!usableLink && attempt.status == 0) links[attempt.handle] else null
+                }
+                if (!closed.get() && !usableLink) {
+                    if (unused != null) finishOutbound(transport, unused, remembered)
+                    if (remembered && cancellationFailed && attempt.status < 0) preferredCleanupFailed = true
+                    if (preferredCleanupFailed) {
+                        throw ConnectionFailure("outbound_acl_cleanup_failed", -1, "Previous Bluetooth ACL release was not confirmed")
                     }
                 }
             }
@@ -376,6 +405,9 @@ class UsbBtBluetoothAdapter(
             throw ConnectionFailure("outbound_auth_command_failed", auth.status, auth.reason)
         }
         val authenticationReported = link.authenticated.await(35_000, TimeUnit.MILLISECONDS)
+        if (authenticationReported && link.authenticationStatus == HciProtocol.STATUS_PIN_OR_KEY_MISSING) {
+            throw ConnectionFailure("outbound_auth_failed", HciProtocol.STATUS_PIN_OR_KEY_MISSING, "Bluetooth pairing key is missing")
+        }
         if (link.closed) throw ConnectionFailure("outbound_auth_disconnected", link.disconnectionReason,
             "Bluetooth ACL disconnected during authentication")
         if (link.encrypted) return
@@ -434,7 +466,8 @@ class UsbBtBluetoothAdapter(
                 val request = HciProtocol.parseConnectionRequest(event) ?: return
                 if (request.linkType != 1) return
                 val address = request.bdAddr.uppercase(Locale.US)
-                val accept = if (outboundOnly) address == aclAttempt?.address else phoneConnectionsAllowed
+                val pending = aclAttempt
+                val accept = if (outboundOnly) pending?.address == address && !pending.retiring else phoneConnectionsAllowed
                 if (accept) {
                     val result = transport.sendCommand(
                         HciProtocol.OP_ACCEPT_CONNECTION_REQUEST, HciProtocol.encodeAcceptConnection(request.rawAddr),
@@ -528,7 +561,9 @@ class UsbBtBluetoothAdapter(
                     }
                     removed?.let {
                         it.disconnectionReason = disconnected.reason
-                        releaseLink(it, false)
+                        // Remote user, low resources, power off, or link supervision timeout.
+                        val fromPeer = disconnected.reason in 0x13..0x15 || disconnected.reason == 0x08
+                        releaseLink(it, false, fromPeer)
                     }
                 }
             }
@@ -597,7 +632,7 @@ class UsbBtBluetoothAdapter(
                     deliverIncoming(link)
                 }
             }
-            rfcomm.onDlcClosed = { link.stream?.remoteClosed() }
+            rfcomm.onDlcClosed = { link.stream?.end(fromPeer = true) }
             rfcomm::onRfcommFrame
         }
     }
@@ -653,11 +688,11 @@ class UsbBtBluetoothAdapter(
         }
     }
 
-    private fun releaseLink(link: Link, sendDisc: Boolean) {
+    private fun releaseLink(link: Link, sendDisc: Boolean, fromPeer: Boolean = false) {
         link.closed = true
         link.authenticated.countDown()
         link.encryptionChanged.countDown()
-        link.stream?.remoteClosed()
+        link.stream?.end(fromPeer)
         link.rfcomm?.close(sendDisc)
         link.l2cap.close(sendDisc)
     }
@@ -726,6 +761,8 @@ private class UsbBtRfcommStream(
     private var queuedBytes = 0
     private var headOffset = 0
     private var ended = false
+    @Volatile var closedByPeer = false
+        private set
     private var overflow = false
     private var wakePending = false
     private val delivered = AtomicBoolean(false)
@@ -781,13 +818,17 @@ private class UsbBtRfcommStream(
         synchronized(monitor) { wakePending = true; monitor.notifyAll() }
     }
 
-    fun remoteClosed() {
-        synchronized(monitor) { ended = true; monitor.notifyAll() }
+    fun end(fromPeer: Boolean) {
+        synchronized(monitor) {
+            if (fromPeer && !locallyClosed.get()) closedByPeer = true
+            ended = true
+            monitor.notifyAll()
+        }
     }
 
     override fun close() {
         if (!locallyClosed.compareAndSet(false, true)) return
-        remoteClosed()
+        end(fromPeer = false)
         onClose()
     }
 

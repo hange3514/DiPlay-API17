@@ -463,7 +463,8 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
  @Synchronized override fun onMicrophoneStarted(id:AudioStreamId,config:MicrophoneConfig){if(closed.get())return;val previous=microphones.values.toList();for(m in previous)m.close();check(previous.all{it.released()}){"Previous microphone is still releasing"};microphones.clear();microphones[id]=Microphone(config,routing?.captureContext()?.let{AudioRouting.secondMusic(it)==10}?:false)}
  @Synchronized override fun onMicrophoneStopped(id:AudioStreamId){microphones.remove(id)?.close()}
  inner class AudioOutput(id:AudioStreamId,private val f:com.shilapi.xcertplay.airplay.AudioFormat,private val ownsCallMode:Boolean):Closeable {
-  val role=LegacyAudioPolicy.role(id.type,f.audioType);private val stream=routing?.stream(role)?:AudioManager.STREAM_MUSIC
+  val role=LegacyAudioPolicy.role(id.type,f.audioType)
+  private var stream=routing?.stream(role)?:AudioManager.STREAM_MUSIC
   private var playing=false;private val navigationActivity=NavigationActivity()
   private val music=role=="media"
   private val realtime=id.type!=BufferedAudioStream.STREAM_TYPE
@@ -496,6 +497,9 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
   // covered by that audible result, so do not add it to the production path.
   private val outputChannels=LegacyAudioPolicy.outputChannels(role,f.channels)
   private val outputRate=LegacyAudioPolicy.outputRate(role,f.sampleRate)
+  private val outputChannelConfig=if(outputChannels==1)android.media.AudioFormat.CHANNEL_OUT_MONO else android.media.AudioFormat.CHANNEL_OUT_STEREO
+  private var trackBufferBytes=0
+  private var navigationTrackReported=false
   private val musicClock=if(realtimeMusic)MusicClockCalibration(outputRate,f.rtpClockRate)else null
   private var lastClockSequence:Int?=null
   private var lastClockQueueDrops=0L
@@ -518,6 +522,43 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
    if(realtime)queue.offerOwned(b,t,frames)else queue.offer(b,t,frames)
   }
   @Synchronized fun volume(value:Float){val t=track?:return;if(appliedVolume==value)return;runCatching{if(t.setStereoVolume(value,value)==AudioTrack.SUCCESS)appliedVolume=value}}
+  private fun openPcmTrack():AudioTrack{
+   val next=AudioTrack(stream,outputRate,outputChannelConfig,android.media.AudioFormat.ENCODING_PCM_16BIT,
+    trackBufferBytes,AudioTrack.MODE_STREAM)
+   var installed=false
+   try{
+    check(next.state==AudioTrack.STATE_INITIALIZED){"AudioTrack initialization failed"}
+    check(next.setStereoVolume(0f,0f)==AudioTrack.SUCCESS){"Initial audio gain rejected"}
+    // The worker owns the track. Publish only once the muted track is ready for focus callbacks.
+    synchronized(this){
+     if(stop.get())throw InterruptedException("Audio output stopped")
+     appliedVolume=0f
+     track=next
+     installed=true
+    }
+    return next
+   }finally{
+    if(!installed)runCatching{next.release()}
+   }
+  }
+  private fun reopenNavigationOnMedia(phase:String,failure:RuntimeException):AudioTrack?{
+   if(role!="navigation"||stop.get()||routing?.fallbackNavigationStream(stream,phase,failure)!=true)return null
+   val rejected=synchronized(this){
+    val previous=track
+    track=null
+    appliedVolume=Float.NaN
+    previous
+   }
+   runCatching{rejected?.stop()}
+   runCatching{rejected?.release()}
+   playing=false
+   stream=AudioManager.STREAM_MUSIC
+   trackResetAtBytes=bytesWritten
+   lastHead=0L
+   navigationTrackReported=false
+   speechTiming?.reset()
+   return openPcmTrack()
+  }
   private fun stopIdleNavigation(){
    if(playing&&role=="navigation"&&!navigationActivity.active(System.nanoTime())){
     track?.stop()
@@ -533,35 +574,60 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
    val bytes=rateConverter?.invoke(channelBytes)?:channelBytes
    pcmEvidence.observe(bytes)
    if(role=="navigation"&&!navigationActivity.packet(bytes,System.nanoTime())){stopIdleNavigation();return}
-   val level=routing?.packet(role)?:playbackFocus?.packet()?:1f
-   volume(level)
-   if(level==0f){mutedPackets++;musicClock?.reset();speechTiming?.clearDry();progress();return}
-   if(callDownlinkGain!=null){
-    CallDuplexAB.callDownlinkFirstPcm(routing?.captureContext())
-    callDownlinkGain.apply(bytes)
-   }
-   if(!playing){track!!.play();playing=true}
-   if(role=="call")CallDuplexAB.injectPhaseTone(routing?.captureContext(),track!!,outputRate,outputChannels,stream)
-   var at=0
-   while(at<bytes.size&&!stop.get()){
-    val started=if(music||speechTiming!=null)System.nanoTime()else 0L
-    val runway=observeMusicBeforeWrite(started)
-    val n=track!!.write(bytes,at,bytes.size-at)
-    if(started!=0L){
-     val wroteForNs=System.nanoTime()-started
-     maxTrackWriteNs=maxOf(maxTrackWriteNs,wroteForNs)
-     // A long blocking write can hide an underrun while the driver accepts the new buffer.
-     if(runway>0L&&wroteForNs>runway)musicClock?.reset()
-     else if(runway>0L&&n>0&&!stop.get())applyMusicClockCorrection()
+   playback@ while(!stop.get()){
+    val level=routing?.packet(role)?:playbackFocus?.packet()?:1f
+    volume(level)
+    if(level==0f){mutedPackets++;musicClock?.reset();speechTiming?.clearDry();progress();return}
+    if(callDownlinkGain!=null){
+     CallDuplexAB.callDownlinkFirstPcm(routing?.captureContext())
+     callDownlinkGain.apply(bytes)
     }
-    if(n<=0&&stop.get())return
-    if(n<=0)throw IllegalStateException("AudioTrack write failed")
-    at+=n
-    bytesWritten+=n
+    if(!playing){
+     try{
+      val current=track!!
+      current.play()
+      if(role=="navigation"&&stream!=AudioManager.STREAM_MUSIC)
+       check(current.playState==AudioTrack.PLAYSTATE_PLAYING){"Navigation AudioTrack play rejected"}
+      playing=true
+     }catch(failure:RuntimeException){
+      if(reopenNavigationOnMedia("play",failure)!=null)continue@playback
+      throw failure
+     }
+    }
+    if(role=="call")CallDuplexAB.injectPhaseTone(routing?.captureContext(),track!!,outputRate,outputChannels,stream)
+    var at=0
+    while(at<bytes.size&&!stop.get()){
+     val started=if(music||speechTiming!=null)System.nanoTime()else 0L
+     val runway=observeMusicBeforeWrite(started)
+     val n=try{
+      track!!.write(bytes,at,bytes.size-at).also{result->
+       if(result<=0&&!stop.get())throw IllegalStateException("AudioTrack write failed: $result")
+      }
+     }catch(failure:RuntimeException){
+      // Replay only a packet for which the old track has accepted no PCM.
+      if(at==0&&bytesWritten==trackResetAtBytes&&reopenNavigationOnMedia("first_write",failure)!=null)continue@playback
+      throw failure
+     }
+     if(started!=0L){
+      val wroteForNs=System.nanoTime()-started
+      maxTrackWriteNs=maxOf(maxTrackWriteNs,wroteForNs)
+      // A long blocking write can hide an underrun while the driver accepts the new buffer.
+      if(runway>0L&&wroteForNs>runway)musicClock?.reset()
+      else if(runway>0L&&n>0&&!stop.get())applyMusicClockCorrection()
+     }
+     if(n<=0)return
+     if(role=="navigation"&&!navigationTrackReported&&(at until at+n).any { bytes[it].toInt()!=0 }){
+      navigationTrackReported=true
+      routing?.navigationTrackReady(stream)
+     }
+     at+=n
+     bytesWritten+=n
+    }
+    if(at>0)speechTiming?.clearDry()
+    if(bytesWritten==bytes.size.toLong())log("audio_first_pcm_written eventType=audio_pcm_written role=$role codec=${f.codec} sampleRate=$outputRate channels=$outputChannels writtenBytes=$bytesWritten")
+    progress()
+    return
    }
-   if(at>0)speechTiming?.clearDry()
-   if(bytesWritten==bytes.size.toLong())log("audio_first_pcm_written eventType=audio_pcm_written role=$role codec=${f.codec} sampleRate=$outputRate channels=$outputChannels writtenBytes=$bytesWritten")
-   progress()
   }
   private fun observeMusicPacket(packet:AudioInput.Packet){
    val timing=musicTiming?:return
@@ -724,13 +790,14 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
     runCatching{android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)}
     val opus=if(f.codec==AudioCodecKind.OPUS)WirelessOpus.Decoder(f.sampleRate,f.channels)else null
     var opusErrors=0
-    val channels=if(outputChannels==1)android.media.AudioFormat.CHANNEL_OUT_MONO else android.media.AudioFormat.CHANNEL_OUT_STEREO
-    val min=AudioTrack.getMinBufferSize(outputRate,channels,android.media.AudioFormat.ENCODING_PCM_16BIT);require(min>0)
-    val t=AudioTrack(stream,outputRate,channels,android.media.AudioFormat.ENCODING_PCM_16BIT,maxOf(min*2,outputRate*outputChannels/5),AudioTrack.MODE_STREAM)
-    // Publish only after initial gain and its cache agree. Focus callbacks use the same lock.
-    synchronized(this){track=t;require(t.state==AudioTrack.STATE_INITIALIZED);check(t.setStereoVolume(0f,0f)==AudioTrack.SUCCESS){"Initial audio gain rejected"};appliedVolume=0f}
+    val min=AudioTrack.getMinBufferSize(outputRate,outputChannelConfig,android.media.AudioFormat.ENCODING_PCM_16BIT);require(min>0)
+    trackBufferBytes=maxOf(min*2,outputRate*outputChannels/5)
+    val t=try{openPcmTrack()}catch(failure:RuntimeException){
+     reopenNavigationOnMedia("initialize",failure)?:throw failure
+    }
     if(f.codec==AudioCodecKind.AAC_LC)startAac()
-    log("audio_started role=$role stream=$stream codec=${f.codec} inputRate=${f.sampleRate} inputChannels=${f.channels} outputChannels=$outputChannels outputRate=$outputRate actualStream=${t.streamType} nativeRate=${AudioTrack.getNativeOutputSampleRate(stream)}");var packets=0;var pending:AudioInput.Packet?=null
+    val nativeRate=runCatching{AudioTrack.getNativeOutputSampleRate(stream)}.getOrDefault(0)
+    log("audio_started role=$role stream=$stream codec=${f.codec} inputRate=${f.sampleRate} inputChannels=${f.channels} outputChannels=$outputChannels outputRate=$outputRate actualStream=${t.streamType} nativeRate=$nativeRate");var packets=0;var pending:AudioInput.Packet?=null
     var musicPrimed=!music
     var musicDrySinceNs:Long?=null
     var musicDryAtBytes=0L
@@ -917,7 +984,7 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
   private fun alsaCapture(buffer:ByteArray,context:android.content.Context?,diagnostic:CallMicCapture.Recorder?,sendFrame:(ByteArray)->Boolean):Boolean{
    if(!AlsaProbe.available()){log("microphone_alsa_scan result=native_unavailable fallback=AudioRecord kind=${c.audioType}");return false}
    val inventory=try{AlsaCapturePathSelector.discover(context)}catch(e:Throwable){log("microphone_alsa_scan result=inventory_failed error=${e.javaClass.simpleName}");return false}
-   val candidates=inventory.candidates
+   val candidates=inventory.candidates.filterNot { it.isLoopback() }
    val candidateSummary=candidates.joinToString(","){it.path.substringAfter("/dev/snd/")+":"+it.source}.take(420)
    val procSummary=inventory.pcmText.lines().filter{it.contains("capture",true)}.joinToString(";").take(420)
    log("microphone_alsa_inventory profile=${inventory.profileKey} native=true cards=${inventory.cardsText.replace('\n',';').take(260)} pcmCapture=$procSummary candidates=$candidateSummary truncated=${inventory.truncated}")
@@ -940,21 +1007,28 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
     fun captureStage(code:Int)=when(code){1->"open";2->"hw_refine";3->"invalid_range";4->"hw_params";5->"sw_params";6->"prepare";7->"ready";8->"start_failed";else->"unknown"}
    var nextIndex=0
    fun openCandidate(candidate:AlsaCapturePathSelector.Candidate):LegacyAlsaOpened?{
-    val formats=listOf(48000 to 2,44100 to 2,c.sampleRate to 2,48000 to 1,44100 to 1,c.sampleRate to 1,16000 to 1,8000 to 1).distinct()
-    for((requestedRate,requestedChannels) in formats){
-      if(stop.get())return null
+    val formats=inventory.captureFormats(candidate,c.sampleRate).toMutableList()
+    var formatIndex=0
+    while(formatIndex<formats.size&&!stop.get()){
+     val(requestedRate,requestedChannels)=formats[formatIndex++]
       if(!beforeCards.containsKey(candidate.card)){beforeCards[candidate.card]=candidate.copy();mixerSnapshot(candidate,"before")}
      val params=IntArray(2)
       val status=IntArray(8)
       val handle=try{AlsaProbe.captureOpen(candidate.path,requestedRate,requestedChannels,params,status)}catch(e:Throwable){
        attempts.add("${candidate.path}:${requestedRate}x${requestedChannels}=jni_${e.javaClass.simpleName}")
        log("microphone_alsa_attempt path=${candidate.path} source=${candidate.source} requestedRate=$requestedRate requestedChannels=$requestedChannels result=jni_failed stage=jni errno=0 rateMin=0 rateMax=0 channelsMin=0 channelsMax=0 negotiatedRate=0 negotiatedChannels=0")
-       continue
+       return null
       }
       val stage=captureStage(status[0])
       if(handle==0L){
        attempts.add("${candidate.path}:${requestedRate}x${requestedChannels}=failed_${stage}_${status[1]}")
        log("microphone_alsa_attempt path=${candidate.path} source=${candidate.source} requestedRate=$requestedRate requestedChannels=$requestedChannels result=open_failed stage=$stage errno=${status[1]} rateMin=${status[2]} rateMax=${status[3]} channelsMin=${status[4]} channelsMax=${status[5]} negotiatedRate=${status[6]} negotiatedChannels=${status[7]}")
+       // The requested format cannot affect opening the node or the initial HW_REFINE.
+       if(status[0]==1||status[0]==2)return null
+       if(formatIndex==1&&status[0] in 4..6){
+        formats.addAll(AlsaCapturePathSelector.extraFormats(status[2],status[3],status[4],status[5])
+         .filterNot { it in formats }.take(8))
+       }
        continue
       }
      val rate=params[0];val channels=params[1]
@@ -977,7 +1051,7 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
    fun logScan(result:String,selected:LegacyAlsaOpened?){
     val chosen=selected?.let{" selected=${it.candidate.path} rate=${it.rate} channels=${it.channels} source=${it.candidate.source}"}.orEmpty()
      val untried=(candidates.size-nextIndex).coerceAtLeast(0)
-     val omitted=(inventory.totalCandidates-candidates.size).coerceAtLeast(0)
+     val omitted=(inventory.totalCandidates-inventory.candidates.size).coerceAtLeast(0)
      log("microphone_alsa_scan profile=${inventory.profileKey} result=$result candidates=${candidates.size} tried=$nextIndex untriedCandidates=$untried omittedCandidates=$omitted truncated=${inventory.truncated}$chosen attempts=${attempts.joinToString(";").take(620)}")
    }
    var active=openNext()
@@ -1054,7 +1128,10 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
         log("microphone_alsa_signal_detected path=${current.candidate.path} peak=$windowPeak meanAbs=$meanAbs rate=${current.rate} channels=${current.channels}")
        }
        if(windowPeak==0){silentWindows++}else silentWindows=0
-       if(silentWindows>=3&&nextIndex<candidates.size){switchCandidate=true}
+       // Silence can be intentional on a capture path that has already produced signal.
+       if(silentWindows>=3&&!signalReported&&!inventory.hasProvenSignal(current.candidate)){
+        switchCandidate=true
+       }
        windowPackets=0;windowPeak=0;windowAbs=0;windowSamples=0;windowStart=now
       }
      }
@@ -1074,11 +1151,9 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
       log("microphone_alsa_switch reason=three_digital_zero_windows from=${current.candidate.path} to=probe_next")
       AlsaProbe.captureClose(current.handle);active=null
       val next=openNext()
-       if(next!=null){active=next;selected=next;filled=0;frac=0.0;carry=0;silentWindows=0;signalReported=false;windowStart=System.nanoTime();windowPackets=0;windowPeak=0;windowAbs=0;windowSamples=0;log("microphone_alsa_switch_selected path=${next.candidate.path} source=${next.candidate.source} rate=${next.rate} channels=${next.channels} untriedCandidates=${(candidates.size-nextIndex).coerceAtLeast(0)} omittedCandidates=${(inventory.totalCandidates-candidates.size).coerceAtLeast(0)} truncated=${inventory.truncated} attempts=${attempts.joinToString(";").take(520)}");continue}
-      val restored=openCandidate(current.candidate)
-      if(restored==null){log("microphone_capture_fallback path=AudioRecord reason=alsa_zero_path_could_not_reopen kind=${c.audioType} attempts=${attempts.joinToString(";").take(520)}");return false}
-      active=restored;selected=restored;filled=0;frac=0.0;carry=0;silentWindows=0;signalReported=false;windowStart=System.nanoTime();windowPackets=0;windowPeak=0;windowAbs=0;windowSamples=0
-      log("microphone_alsa_zero_alternatives_unavailable retained=${restored.candidate.path} attempts=${attempts.joinToString(";").take(520)}")
+       if(next!=null){active=next;selected=next;filled=0;frac=0.0;carry=0;silentWindows=0;signalReported=false;windowStart=System.nanoTime();windowPackets=0;windowPeak=0;windowAbs=0;windowSamples=0;log("microphone_alsa_switch_selected path=${next.candidate.path} source=${next.candidate.source} rate=${next.rate} channels=${next.channels} untriedCandidates=${(candidates.size-nextIndex).coerceAtLeast(0)} omittedCandidates=${(inventory.totalCandidates-inventory.candidates.size).coerceAtLeast(0)} truncated=${inventory.truncated} attempts=${attempts.joinToString(";").take(520)}");continue}
+      log("microphone_capture_fallback path=AudioRecord reason=alsa_no_signal kind=${c.audioType} attempts=${attempts.joinToString(";").take(520)}")
+      return false
      }
     }
     }finally{active?.let{AlsaProbe.captureClose(it.handle)};for(candidate in beforeCards.values)mixerSnapshot(candidate,"after");log("microphone_alsa_closed kind=${c.audioType} selected=${selected.candidate.path} capturedPackets=$captured")}
@@ -1197,9 +1272,8 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
     }
     val buffer=ByteArray(c.frameBytes);var filled=0;var paused=false;var nextSilenceNs=0L
     // Prefer a direct, dynamically discovered ALSA input on every microphone stream.
-    // The MX9A0's known-good pcmC1D0c path is tried first; other capture-capable nodes
-    // are discovered from /proc/asound and /dev/snd. AudioRecord is used only when no
-    // direct ALSA candidate can be opened, and that fallback is explicitly logged.
+    // Keep the known-good path for the MX9A0. Other units use their detected hardware.
+    // If no direct path supplies usable PCM, explicitly log the fallback to AudioRecord.
     val alsaDone=alsaCapture(buffer,context,diagnostic,::sendFrame)
     val audioManager=if(alsaDone||stop.get())null else context?.getSystemService(android.content.Context.AUDIO_SERVICE) as? AudioManager
     while(!alsaDone&&!stop.get()){
