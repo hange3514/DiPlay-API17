@@ -16,9 +16,13 @@ import org.json.JSONObject;
 public final class OemAudioObserver extends BroadcastReceiver implements Closeable {
     private static final int MAX_RAW_CALL_FRAMES = 24;
     private static final int MAX_RAW_WHOLE_CALL_FRAMES = 64;
+    private static final String NAVI_START = "android.intent.action.MULTIMEDIA_NAVI_AUDIO_START";
+    private static final String NAVI_STOP = "android.intent.action.MULTIMEDIA_NAVI_AUDIO_STOP";
+    private static final int MAX_NAVIGATION_BROADCASTS = 12;
     private final Context context;
     private final Handler sampler = new Handler(Looper.getMainLooper());
     private boolean registered;
+    private int navigationBroadcasts;
     private String lastState;
     private long lastSampleLog;
     private static volatile long callRouteCaptureUntil;
@@ -53,6 +57,28 @@ public final class OemAudioObserver extends BroadcastReceiver implements Closeab
     }
 
     static void endCallRouteCapture() { callRouteCaptureUntil = 0; callRouteCapturePhase = "none"; wholeCallCapture = false; }
+
+    static void beginSahCallRouteCapture(boolean exiting) {
+        callRouteCapturePhase = exiting ? "sah_call_exit" : "sah_call_active";
+        rawCallFrameCount = 0;
+        wholeCallCapture = false;
+        callRouteCaptureUntil = SystemClock.elapsedRealtime() + (exiting ? 8_000L : 120_000L);
+    }
+
+    /** Keeps decoded source feedback in the report without adding a raw payload. */
+    private static boolean recordSahCallFeedback(Context context, long now, int group, int command,
+            String origin, int decodedSource) throws Exception {
+        String phase = callRouteCapturePhase;
+        if (!phase.startsWith("sah_call_")) return false;
+        if (rawCallFrameCount < MAX_RAW_CALL_FRAMES) {
+            rawCallFrameCount++;
+            String summary = "origin=" + origin + " group=" + group + " command=" + command;
+            if (decodedSource >= 0) summary += " decodedSource=" + decodedSource;
+            MainActivity.record(context, "CALL_OEM_ROUTE", new JSONObject()
+                    .put("elapsedMs", now).put("phase", phase).put("diagnosticSummary", summary));
+        }
+        return true;
+    }
 
     static boolean shouldCaptureCallRouteFrame(String action, int group, int command, long now, long until) {
         boolean rawSerial = "INTENT_SERIAL_DATA".equals(action);
@@ -92,8 +118,8 @@ public final class OemAudioObserver extends BroadcastReceiver implements Closeab
         // OEM service's own request echo.
         f.addAction("INTENT_SERIAL_DATA");
         f.addAction("android.intent.action.MULTIMEDIA_AUDIO_FOCUS_INFO");
-        f.addAction("android.intent.action.MULTIMEDIA_NAVI_AUDIO_START");
-        f.addAction("android.intent.action.MULTIMEDIA_NAVI_AUDIO_STOP");
+        f.addAction(NAVI_START);
+        f.addAction(NAVI_STOP);
         context.registerReceiver(this, f);
         registered = true;
         sampler.post(sample);
@@ -122,6 +148,13 @@ public final class OemAudioObserver extends BroadcastReceiver implements Closeab
         try {
             String action = i.getAction();
             long now = SystemClock.elapsedRealtime();
+            if (navigationBroadcasts < MAX_NAVIGATION_BROADCASTS &&
+                    (NAVI_START.equals(action) || NAVI_STOP.equals(action))) {
+                navigationBroadcasts++;
+                MainActivity.record(c, "NAVIGATION_AUDIO_ROUTE", new JSONObject()
+                        .put("stage", NAVI_START.equals(action) ? "oem_navi_started" : "oem_navi_stopped")
+                        .put("diagnosticSummary", "source=oem_navi_broadcast"));
+            }
             if ("INTENT_SERIAL_DATA".equals(action)) {
                 byte[] frame = i.getByteArrayExtra("list");
                 // Official CSerialPortProxy documents the raw payload at byte 4:
@@ -132,6 +165,8 @@ public final class OemAudioObserver extends BroadcastReceiver implements Closeab
                 if (frame == null || frame.length < 7) return;
                 int group = frame[4] & 255, command = frame[5] & 255;
                 if (!shouldCaptureCallRouteFrame(action, group, command, now, callRouteCaptureUntil)) return;
+                if (recordSahCallFeedback(c, now, group, command, "raw_serial",
+                        group == 1 && command == 2 ? frame[6] & 255 : -1)) return;
                 if (group == 1 && command == 2) {
                     McuSourceListener listener = mcuSourceListener;
                     if (listener != null) listener.onMcuSource(frame[6] & 255, now);
@@ -158,7 +193,8 @@ public final class OemAudioObserver extends BroadcastReceiver implements Closeab
                 byte[] b = i.getByteArrayExtra("list");
                 if (b == null || b.length < 2) return;
                 int group = b[0] & 255, command = b[1] & 255;
-                if (shouldCaptureCallRouteFrame(action, group, command, now, callRouteCaptureUntil)) {
+                if (shouldCaptureCallRouteFrame(action, group, command, now, callRouteCaptureUntil)
+                        && !recordSahCallFeedback(c, now, group, command, "app_feedback", -1)) {
                     JSONArray bytes = new JSONArray();
                     for (int n = 0; n < Math.min(b.length, 12); n++) bytes.put(b[n] & 255);
                     MainActivity.record(c, "OEM_CALL_ROUTE_FEEDBACK", new JSONObject()

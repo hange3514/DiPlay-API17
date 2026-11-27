@@ -58,11 +58,12 @@ final class CompatibilityEvidence {
                 "oemBroadcastAction", "oemNonKeyFramesSinceLastSample", "keyCandidate", "keyScanCode",
                 "keyWindowFocused", "keyConsumedByDiPlay", "projectionReady", "connection");
         } else if ("AUDIO_ROUTING".equals(type)) {
-            summary = fields(detail, "nativeNavigation", "callStream", "callFocusStream",
+            summary = fields(detail, "strategy", "nativeNavigation", "callStream", "callFocusStream",
                 "callDownlinkRoute", "callAndroidRoutePolicy");
         } else if ("CALL_AUDIO_ROUTE".equals(type)) {
-            summary = fields(detail, "detail", "platformPhoneStrategy", "previousMode", "activeMode",
-                "outputStream", "focusStream", "activeSpeakerphone", "activeVolume", "maxVolume", "volumeMaxAccepted");
+            summary = fields(detail, "strategy", "detail", "platformPhoneStrategy", "previousMode", "activeMode",
+                "outputStream", "focusStream", "activeSpeakerphone", "previousVolume", "activeVolume",
+                "maxVolume", "volumePolicy", "volumeMaxAccepted");
         } else return;
         if (summary.length() > SUMMARY_LIMIT) summary = summary.substring(0, SUMMARY_LIMIT);
         if (!summary.isEmpty()) safe.put("diagnosticSummary", summary);
@@ -74,7 +75,8 @@ final class CompatibilityEvidence {
 
     static boolean isAudio(String type) {
         return "ALSA_CAPTURE".equals(type) || "AUDIO_ROUTING".equals(type) || "CALL_AUDIO_ROUTE".equals(type)
-            || "CALL_OUTPUT_DIAG".equals(type) || "AUDIO_SPEECH_PLAYOUT".equals(type)
+            || "CALL_OUTPUT_DIAG".equals(type) || "CALL_OEM_ROUTE".equals(type) || "NAVIGATION_AUDIO_ROUTE".equals(type)
+            || "AUDIO_SPEECH_PLAYOUT".equals(type)
             || "AUDIO_SPEECH_RECEIVE".equals(type) || "MICROPHONE_UPLINK".equals(type);
     }
 

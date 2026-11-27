@@ -17,6 +17,7 @@ import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONObject;
@@ -24,29 +25,38 @@ import org.json.JSONObject;
 /** Keeps USB authorization in the foreground until its system result arrives. */
 public final class UsbAttachActivity extends Activity {
     private static final long PERMISSION_TIMEOUT_MS = 45000L;
+    private static final long DEVICE_CHECK_INTERVAL_MS = 500L;
+    private static final long MISSING_DEVICE_SETTLE_MS = 1000L;
     private static final ExecutorService USB_EVENT_LOGGER = Executors.newSingleThreadExecutor();
     private final long activityStartedAt = SystemClock.elapsedRealtime();
     private static volatile boolean permissionGuard;
     private static volatile long activityPermissionDeniedAt;
+    private static UsbDevice activityPermissionDeniedDevice;
 
     static synchronized boolean beginPermissionFlow() {
         if (permissionGuard) return false;
         activityPermissionDeniedAt = 0L;
+        activityPermissionDeniedDevice = null;
         permissionGuard = true;
         return true;
     }
 
-    static synchronized void endPermissionFlow(boolean denied) {
-        if (denied) activityPermissionDeniedAt = SystemClock.elapsedRealtime();
+    static synchronized void endPermissionFlow(UsbDevice deniedDevice) {
+        if (deniedDevice != null) {
+            activityPermissionDeniedAt = SystemClock.elapsedRealtime();
+            activityPermissionDeniedDevice = deniedDevice;
+        }
         permissionGuard = false;
     }
 
     static boolean permissionFlowActive() { return permissionGuard; }
 
-    static synchronized boolean consumeRecentActivityPermissionDenial() {
-        long deniedAt = activityPermissionDeniedAt;
+    static synchronized boolean consumeRecentActivityPermissionDenial(UsbDevice device) {
+        if (!sameDevice(activityPermissionDeniedDevice, device)) return false;
+        boolean recent = SystemClock.elapsedRealtime() - activityPermissionDeniedAt <= PERMISSION_TIMEOUT_MS;
         activityPermissionDeniedAt = 0L;
-        return deniedAt > 0L && SystemClock.elapsedRealtime() - deniedAt <= PERMISSION_TIMEOUT_MS;
+        activityPermissionDeniedDevice = null;
+        return recent;
     }
 
     private final Handler handler = new Handler();
@@ -59,23 +69,56 @@ public final class UsbAttachActivity extends Activity {
     private boolean completed;
     private boolean ownsPermissionFlow;
     private long requestStartedAt;
+    private long missingSince = -1L;
     private String permissionAction;
+    private int permissionRequestId;
 
     private final Runnable timeout = new Runnable() {
         @Override public void run() {
             if (!requestPending || completed) return;
             requestPending = false;
             record("permission_wait_timeout", pendingDevice, SystemClock.elapsedRealtime() - requestStartedAt);
+            if (continueWithReplacement()) return;
+            if (!isDevicePresent(pendingDevice)) { finishAndStartWatcher(); return; }
+            if (usb.hasPermission(pendingDevice)) { finishAndStartWatcher(); return; }
             releasePermissionFlow(true);
-            AutoUsbService.pause(UsbAttachActivity.this);
+            AutoUsbService.pauseForDevice(UsbAttachActivity.this, pendingDevice);
             finishQuietly();
+        }
+    };
+
+    private final Runnable checkDevice = new Runnable() {
+        @Override public void run() {
+            if (!requestPending || completed) return;
+            final long now = SystemClock.elapsedRealtime();
+            try {
+                if (isDevicePresent(pendingDevice)) {
+                    missingSince = -1L;
+                    if (usb.hasPermission(pendingDevice)) {
+                        record("permission_observed_granted", pendingDevice, now - requestStartedAt);
+                        finishAndStartWatcher();
+                        return;
+                    }
+                } else {
+                    if (missingSince < 0L) missingSince = now;
+                    if (now - missingSince >= MISSING_DEVICE_SETTLE_MS) {
+                        record("permission_device_missing", pendingDevice, now - requestStartedAt);
+                        if (!continueWithReplacement()) finishAndStartWatcher();
+                        return;
+                    }
+                }
+            } catch (RuntimeException error) {
+                record("permission_status_error", pendingDevice, now - requestStartedAt);
+            }
+            handler.removeCallbacks(this);
+            handler.postDelayed(this, DEVICE_CHECK_INTERVAL_MS);
         }
     };
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         usb = (UsbManager) getSystemService(Context.USB_SERVICE);
-        permissionAction = getPackageName() + ".USB_ATTACH_PERMISSION";
+        permissionAction = getPackageName() + ".USB_ATTACH_PERMISSION." + UUID.randomUUID();
         handle(getIntent());
     }
 
@@ -96,8 +139,14 @@ public final class UsbAttachActivity extends Activity {
         setIntent(intent);
         UsbDevice next = attachedAppleDevice(intent);
         if (next == null) return;
+        if (completed) {
+            AutoUsbService.start(this);
+            return;
+        }
         if (requestPending) {
             if (!sameDevice(pendingDevice, next)) queuedDevice = next;
+            handler.removeCallbacks(checkDevice);
+            handler.post(checkDevice);
             return;
         }
         processDevice(next);
@@ -123,6 +172,11 @@ public final class UsbAttachActivity extends Activity {
         pendingDevice = device;
         record("attach_received", device, 0L);
         try {
+            if (!isDevicePresent(device)) {
+                record("stale_attach_ignored", device, 0L);
+                finishAndStartWatcher();
+                return;
+            }
             // A default USB-handler Activity is also launched for iPhone mode re-enumeration.
             // Check the new device's grant before consulting the connection service: the service
             // may still be waiting on the previous UsbDevice instance while Android has already
@@ -133,7 +187,14 @@ public final class UsbAttachActivity extends Activity {
                 finishAndStartWatcher();
                 return;
             }
-            if (WiredService.awaitingPermission() || permissionFlowActive()) {
+            for (UsbDevice present : usb.getDeviceList().values()) {
+                if (present.getVendorId() == 0x05ac && !sameDevice(present, device)) {
+                    record("permission_deferred_multiple_devices", device, 0L);
+                    finishAndStartWatcher();
+                    return;
+                }
+            }
+            if (WiredService.awaitingPermission() || (!ownsPermissionFlow && permissionFlowActive())) {
                 record("permission_flow_owned_elsewhere", device, 0L);
                 finishQuietly();
                 return;
@@ -142,7 +203,7 @@ public final class UsbAttachActivity extends Activity {
         } catch (Throwable error) {
             record("permission_request_error", device, 0L);
             releasePermissionFlow(true);
-            AutoUsbService.pause(this);
+            AutoUsbService.pauseForDevice(this, device);
             finishQuietly();
         }
     }
@@ -150,7 +211,7 @@ public final class UsbAttachActivity extends Activity {
     private void requestPermission(UsbDevice device) {
         pendingDevice = device;
         queuedDevice = null;
-        if (!beginPermissionFlow()) {
+        if (!ownsPermissionFlow && !beginPermissionFlow()) {
             record("permission_flow_owned_elsewhere", device, 0L);
             finishQuietly();
             return;
@@ -158,42 +219,72 @@ public final class UsbAttachActivity extends Activity {
         ownsPermissionFlow = true;
         requestPending = true;
         requestStartedAt = SystemClock.elapsedRealtime();
+        missingSince = -1L;
         showWaiting("\u6b63\u5728\u7b49\u5f85\u8f66\u673a USB \u6388\u6743\u7a97\u53e3\u3002\u8bf7\u70b9\u51fb\u7cfb\u7edf\u7a97\u53e3\u4e2d\u7684\u201c\u5141\u8bb8\u201d\uff0c\u5e94\u7528\u4f1a\u81ea\u52a8\u7ee7\u7eed\u3002");
         registerPermissionReceiver();
-        Intent permission = new Intent(permissionAction).setPackage(getPackageName());
-        PendingIntent result = PendingIntent.getBroadcast(this, 1704, permission, PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent permission = new Intent(permissionAction).setPackage(getPackageName())
+                .putExtra("request_id", ++permissionRequestId);
+        PendingIntent result = PendingIntent.getBroadcast(this, permissionRequestId, permission, PendingIntent.FLAG_ONE_SHOT);
         usb.requestPermission(device, result);
         record("permission_requested", device, 0L);
         handler.removeCallbacks(timeout);
         handler.postDelayed(timeout, PERMISSION_TIMEOUT_MS);
+        handler.removeCallbacks(checkDevice);
+        handler.postDelayed(checkDevice, DEVICE_CHECK_INTERVAL_MS);
     }
 
     private void registerPermissionReceiver() {
         if (receiverRegistered) return;
         permissionReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context context, Intent intent) {
-                if (!permissionAction.equals(intent.getAction()) || !requestPending || completed) return;
+                if (!requestPending || completed) return;
+                UsbDevice resultDevice = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction())) {
+                    if (sameDevice(pendingDevice, resultDevice)) {
+                        handler.removeCallbacks(checkDevice);
+                        handler.post(checkDevice);
+                    }
+                    return;
+                }
+                if (!permissionAction.equals(intent.getAction())) return;
+                if (intent.getIntExtra("request_id", 0) != permissionRequestId || !sameDevice(pendingDevice, resultDevice)) {
+                    record("stale_result_ignored", resultDevice, 0L);
+                    return;
+                }
                 requestPending = false;
                 handler.removeCallbacks(timeout);
                 boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                 long waited = Math.max(0L, SystemClock.elapsedRealtime() - requestStartedAt);
                 record(granted ? "permission_granted" : "permission_denied", pendingDevice, waited);
-                if (!granted) {
+                if (continueWithReplacement()) return;
+                if (!isDevicePresent(pendingDevice)) { finishAndStartWatcher(); return; }
+                if (!granted && !usb.hasPermission(pendingDevice)) {
                     releasePermissionFlow(true);
-                    AutoUsbService.pause(UsbAttachActivity.this);
+                    AutoUsbService.pauseForDevice(UsbAttachActivity.this, pendingDevice);
                     finishQuietly();
-                    return;
-                }
-                UsbDevice next = queuedDevice;
-                if (next != null && usb != null && !usb.hasPermission(next)) {
-                    requestPermission(next);
                     return;
                 }
                 finishAndStartWatcher();
             }
         };
-        registerReceiver(permissionReceiver, new IntentFilter(permissionAction));
+        IntentFilter filter = new IntentFilter(permissionAction);
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        registerReceiver(permissionReceiver, filter);
         receiverRegistered = true;
+    }
+
+    private boolean isDevicePresent(UsbDevice device) {
+        return device != null && usb != null && sameDevice(device, usb.getDeviceList().get(device.getDeviceName()));
+    }
+
+    private boolean continueWithReplacement() {
+        UsbDevice next = queuedDevice;
+        if (isDevicePresent(pendingDevice) || !isDevicePresent(next)) return false;
+        handler.removeCallbacks(timeout);
+        handler.removeCallbacks(checkDevice);
+        record("replacement_received", next, 0L);
+        processDevice(next);
+        return true;
     }
 
     private void showWaiting(String message) {
@@ -250,7 +341,7 @@ public final class UsbAttachActivity extends Activity {
     private void releasePermissionFlow(boolean denied) {
         if (!ownsPermissionFlow) return;
         ownsPermissionFlow = false;
-        endPermissionFlow(denied);
+        endPermissionFlow(denied ? pendingDevice : null);
     }
 
     private void cleanupReceiver() {
@@ -275,7 +366,7 @@ public final class UsbAttachActivity extends Activity {
         } catch (Exception ignored) { }
     }
 
-    private boolean sameDevice(UsbDevice left, UsbDevice right) {
+    static boolean sameDevice(UsbDevice left, UsbDevice right) {
         return left != null && right != null && left.getVendorId() == right.getVendorId()
                 && left.getProductId() == right.getProductId()
                 && left.getDeviceName().equals(right.getDeviceName());
@@ -284,12 +375,15 @@ public final class UsbAttachActivity extends Activity {
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
     @Override public void onBackPressed() {
-        if (requestPending) AutoUsbService.pause(this);
+        if (requestPending && isDevicePresent(pendingDevice)) {
+            releasePermissionFlow(true);
+            AutoUsbService.pauseForDevice(this, pendingDevice);
+        }
         finishQuietly();
     }
 
     @Override protected void onDestroy() {
-        if (!completed) releasePermissionFlow(requestPending);
+        if (!completed) releasePermissionFlow(false);
         handler.removeCallbacksAndMessages(null);
         cleanupReceiver();
         super.onDestroy();

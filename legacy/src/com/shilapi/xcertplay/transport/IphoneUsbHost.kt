@@ -79,8 +79,11 @@ class IphoneUsbHost(
     }
 
     sealed class PermissionResult {
-        data class Granted(val device: UsbDevice) : PermissionResult()
-        data class Denied(val device: UsbDevice) : PermissionResult()
+        abstract val device: UsbDevice
+        abstract val requestId: Int
+
+        data class Granted(override val device: UsbDevice, override val requestId: Int) : PermissionResult()
+        data class Denied(override val device: UsbDevice, override val requestId: Int) : PermissionResult()
     }
 
     sealed class TransitionResult {
@@ -99,11 +102,11 @@ class IphoneUsbHost(
         usbManager.deviceList.values.filter { matcher.matches(it.vendorId, it.productId) }
 
     @Throws(IphoneUsbException::class)
-    fun requestPermission(device: UsbDevice): PermissionRequest {
+    fun requestPermission(device: UsbDevice, requestId: Int): PermissionRequest {
         requireConfiguredDevice(device)
         if (usbManager.hasPermission(device)) return PermissionRequest.AlreadyGranted(device)
 
-        usbManager.requestPermission(device, permissionPendingIntent())
+        usbManager.requestPermission(device, permissionPendingIntent(requestId))
         return PermissionRequest.Requested(device)
     }
 
@@ -111,11 +114,13 @@ class IphoneUsbHost(
     fun parsePermissionResult(intent: Intent): PermissionResult? {
         if (intent.action != permissionAction) return null
         val device = intent.usbDevice() ?: return null
+        val requestId = intent.getIntExtra(EXTRA_PERMISSION_REQUEST_ID, 0)
+        if (requestId <= 0) return null
         if (!matcher.matches(device.vendorId, device.productId)) return null
         return if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-            PermissionResult.Granted(device)
+            PermissionResult.Granted(device, requestId)
         } else {
-            PermissionResult.Denied(device)
+            PermissionResult.Denied(device, requestId)
         }
     }
 
@@ -282,13 +287,14 @@ class IphoneUsbHost(
         }
     }
 
-    private fun permissionPendingIntent(): PendingIntent {
+    private fun permissionPendingIntent(requestId: Int): PendingIntent {
         val intent = Intent(permissionAction).setPackage(appContext.packageName)
+            .putExtra(EXTRA_PERMISSION_REQUEST_ID, requestId)
         return PendingIntent.getBroadcast(
             appContext,
-            0,
+            requestId,
             intent,
-            PendingIntent.FLAG_UPDATE_CURRENT,
+            PendingIntent.FLAG_ONE_SHOT,
         )
     }
 
@@ -306,6 +312,7 @@ class IphoneUsbHost(
     private fun Intent.usbDevice(): UsbDevice? = getParcelableExtra(UsbManager.EXTRA_DEVICE)
 
     companion object {
+        private const val EXTRA_PERMISSION_REQUEST_ID = "iphone_usb_permission_request_id"
         private const val USB_VENDOR_DEVICE_IN = 0xc0
         private const val CARPLAY_CONFIGURATION_REQUEST = 0x52
         private const val CARPLAY_CONFIGURATION_INDEX = 0x0004
@@ -331,6 +338,11 @@ class Iap2UsbSession internal constructor(
     private val writeLock = Any()
     private var closed = false
     private var failure: IphoneUsbException? = null
+
+    /** Android API 17 exposes the serial on the authorized connection, not on UsbDevice. */
+    internal fun serialNumber(): String? = synchronized(stateLock) {
+        if (closed) null else local.headunit.diplay.LegacyUsb.boundedSerial(connection)
+    }
 
     fun write(data: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
         checkOpen()

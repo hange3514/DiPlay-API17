@@ -36,13 +36,20 @@ internal enum class WiredConfigurationAction(val diagnostic: String) {
 
 /** Remembers the last enumeration that received a CarPlay StartSession request. */
 internal object WiredSessionMemory {
-    @Volatile private var lastStartedDevice: String? = null
+    private val lastStartedDevice = java.util.concurrent.atomic.AtomicReference<String?>()
 
     fun started(deviceName: String) {
-        lastStartedDevice = deviceName
+        lastStartedDevice.set(deviceName)
     }
 
-    fun startedOn(deviceName: String): Boolean = lastStartedDevice == deviceName
+    fun startedOn(deviceName: String): Boolean = lastStartedDevice.get() == deviceName
+
+    fun detached(deviceName: String) {
+        while (true) {
+            val previous = lastStartedDevice.get()
+            if (previous != deviceName || lastStartedDevice.compareAndSet(previous, null)) return
+        }
+    }
 }
 
 /** One narrow recovery for stale wired sessions, gated by measured NCM and TCP state. */

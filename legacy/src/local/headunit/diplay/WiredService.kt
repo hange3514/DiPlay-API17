@@ -68,7 +68,7 @@ class WiredService:Service() {
   @JvmStatic fun beginVideoCalibration(id:String):Boolean=live?.startCalibration(id)==true
   @JvmStatic fun finishVideoCalibration(id:String):VideoCalibration.Sample?=live?.finishCalibration(id)
   @JvmStatic fun cancelVideoCalibration(id:String){live?.cancelCalibration(id)}
-  @JvmStatic fun isVideoReady():Boolean=live?.videoReady==true
+  @JvmStatic fun isVideoReady():Boolean=live?.let{!it.closed&&it.videoReady}==true
   @Volatile private var live:WiredService?=null
   // Main-thread request state. AudioManager has no registration result.
   private var mediaButtonRegistrationRequested=false
@@ -79,6 +79,22 @@ class WiredService:Service() {
   @JvmStatic fun isBusy():Boolean=live!=null||cleanupCount.get()>0||connectingWorkers.get()>0||MediaWorkers.busy()
   @JvmStatic fun hasUsbLink():Boolean=live?.usbLinked==true
   @JvmStatic fun awaitingPermission():Boolean=live?.usbPermissionPending==true
+  @JvmStatic fun tracksUsbDevice(device:UsbDevice):Boolean=
+   UsbAttachActivity.sameDevice(live?.selectedUsbDevice,device)
+  @JvmStatic fun forgetUsbEnumeration(device:UsbDevice){WiredSessionMemory.detached(device.deviceName)}
+  @JvmStatic fun releaseMissingUsbTarget(devices:Collection<UsbDevice>):Boolean{
+   val owner=live?:return false
+   if(owner.closed||owner.usbReenumerationExpected)return false
+   val target=owner.selectedUsbDevice?:return false
+   if(devices.any{UsbAttachActivity.sameDevice(target,it)})return false
+   // The USB worker may have adopted a new enumeration after the watcher sampled its list.
+   if(UsbAttachActivity.sameDevice(target,owner.usb.deviceList[target.deviceName]))return false
+   if(owner.usbReenumerationExpected||owner.selectedUsbDevice!==target)return false
+   owner.log("USB","stage=target_missing result=release_replaced_link")
+   owner.shutdown()
+   forgetUsbEnumeration(target)
+   return true
+  }
   @JvmStatic fun diagnosticState():JSONObject {
    val owner=live
    val result=JSONObject().put("servicePresent",owner!=null).put("cleanupWorkers",cleanupCount.get()).put("connectingWorkers",connectingWorkers.get()).put("mediaWorkers",MediaWorkers.activeCount())
@@ -207,6 +223,8 @@ class WiredService:Service() {
  private val latestPerformance=ConcurrentHashMap<String,String>()
  @Volatile private var usbLinked=false
  @Volatile private var usbPermissionPending=false
+ @Volatile private var selectedUsbDevice:UsbDevice?=null
+ @Volatile private var usbReenumerationExpected=false
  private var wheelControl:WheelControl?=null
  private var audioObserver:OemAudioObserver?=null
  @Volatile private var wiredStartWatchdog:WiredStartWatchdog?=null
@@ -220,11 +238,13 @@ class WiredService:Service() {
  private val sessions=CopyOnWriteArrayList<AirPlaySession>()
  @Volatile private var server:ServerSocket?=null
  @Volatile private var sink:LegacyMedia?=null
- @Volatile private var authorization=CountDownLatch(0)
- @Volatile private var authorizationDenied=false
- @Volatile private var authorizationRequestedAt=0L
- @Volatile private var authorizationRequestPhase=""
- @Volatile private var authorizationRequestSequence=0L
+ private class UsbAuthorization(val device:UsbDevice,val sequence:Int,val stage:String) {
+  val startedAt=SystemClock.elapsedRealtime()
+  val result=CountDownLatch(1)
+  @Volatile var denied=false
+ }
+ @Volatile private var authorization:UsbAuthorization?=null
+ private var authorizationRequestSequence=0
  @Volatile private var videoReady=false
  @Volatile private var lastFailure:String?=null
  private var calibrationSession:AirPlaySession?=null // protected by resourceLock
@@ -301,10 +321,59 @@ class WiredService:Service() {
   if(metric!=null&&(latestPerformance.containsKey(metric)||latestPerformance.size<12))latestPerformance[metric]="ageMs=${SystemClock.elapsedRealtime()-bornAt} "+detail.take(1200)
   try{MainActivity.record(this,stage,JSONObject().put("detail",detail.take(1200)).put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}}
  fun note(stage:String,text:String){if(stage=="FAILED")lastFailure=text;log(stage,text);sendBroadcast(Intent("local.headunit.diplay.STATUS").setPackage(packageName).putExtra("message",text).putExtra("stage",stage).putExtra("connection_id",connectionId))}
+ private fun onFirstVideoFrame() {
+  synchronized(resourceLock){
+   if(closed||failed.get()||videoReady)return
+   videoReady=true
+   activeDiagnosticStage="video_active"
+   startup.firstFrame(SystemClock.elapsedRealtime())
+  }
+  refreshMediaButtonOwner()
+  CrashEvidence.updateStage(this,connectionId,"video_active",usbLinked,true)
+  reportStartup("first_frame")
+  if(!closed)note("VIDEO_READY","已收到并解码CarPlay画面；按返回键显示控制面板")
+ }
  private fun safeDiagnosticType(t:Throwable):String { val value=t.javaClass.simpleName.replace(Regex("[^A-Za-z0-9_]"),"").take(48);return value.ifEmpty{"Throwable"} }
  private fun recordFailure(e:Throwable,origin:String){try{var root=e;var count=0;while(root.cause!=null&&root.cause!==root&&count++<8)root=root.cause!!;MainActivity.record(this,"CONNECTION_FAILURE",JSONObject().put("origin",origin).put("phase",activeDiagnosticStage).put("errorType",safeDiagnosticType(e)).put("causeType",safeDiagnosticType(root)).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt).put("videoReady",videoReady).put("usbLinked",usbLinked).put("sessionCount",sessions.size).put("activeSession",session!=null).put("userlandNetworkOpen",userlandNetwork!=null).put("networkBackend","lwip_userland_ncm"))}catch(_:Throwable){}}
  private fun fail(e:Throwable,origin:String="connect_worker"){if(!closed&&failed.compareAndSet(false,true)){recordFailure(e,origin);var cause:Throwable?=e;val chain=ArrayList<String>();while(cause!=null&&chain.size<4){chain.add(cause.javaClass.simpleName+": "+(cause.message?:"connection failed").take(160));cause=cause.cause};note("FAILED",chain.joinToString(" → "));shutdown()}}
- override fun onCreate(){super.onCreate();live=this;audioObserver=OemAudioObserver(this);wheelControl=WheelControl(this,object:WheelControl.Sink {override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&!it.isClosed};override fun send(token:Any,action:Int):Boolean {val current=this@WiredService.session;if(closed||current==null||current!==token||current.isClosed)return false;return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);5->{current.invokeSiri();true};else->false}}});usb=getSystemService(Context.USB_SERVICE) as UsbManager;host=IphoneUsbHost(this,usb,IphoneUsbMatcher.appleVendor(),onDiagnostic={log("USB",it)});handles.add(host.registerPermissionReceiver{result->authorizationDenied=result is IphoneUsbHost.PermissionResult.Denied;val device=when(result){is IphoneUsbHost.PermissionResult.Granted->result.device;is IphoneUsbHost.PermissionResult.Denied->result.device};val requestedAt=authorizationRequestedAt;val requestPhase=authorizationRequestPhase;val requestSequence=authorizationRequestSequence;log("USB_PERMISSION_RESULT","sequence=$requestSequence phase=$requestPhase granted=${!authorizationDenied} device=${device.deviceName} vendor=${device.vendorId} product=${device.productId} elapsedMs=${if(requestedAt>0)SystemClock.elapsedRealtime()-requestedAt else -1}");authorization.countDown()})}
+ override fun onCreate(){
+  super.onCreate();live=this;audioObserver=OemAudioObserver(this);wheelControl=WheelControl(this,object:WheelControl.Sink {
+   override fun session():Any?=this@WiredService.session?.takeIf{!closed&&videoReady&&!it.isClosed}
+   override fun send(token:Any,action:Int):Boolean {
+    val current=this@WiredService.session
+    if(closed||current==null||current!==token||current.isClosed)return false
+    return when(action){1->current.sendMedia(5);2->current.sendMedia(4);3->current.sendTelephony(1);4->current.sendTelephony(3);5->{current.invokeSiri();true};else->false}
+   }
+  })
+  usb=getSystemService(Context.USB_SERVICE) as UsbManager
+  host=IphoneUsbHost(this,usb,IphoneUsbMatcher.appleVendor(),"$packageName.IPHONE_USB_PERMISSION.${UUID.randomUUID()}",onDiagnostic={log("USB",it)})
+  handles.add(host.registerPermissionReceiver(::onUsbPermission))
+  val detachReceiver=object:BroadcastReceiver(){
+   override fun onReceive(context:Context,intent:Intent){
+    val device=intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)?:return
+    val targetStillPresent=UsbAttachActivity.sameDevice(device,usb.deviceList[device.deviceName])
+    if(!usbReenumerationExpected&&!targetStillPresent&&UsbAttachActivity.sameDevice(selectedUsbDevice,device)){
+     log("USB","stage=device_detached result=release_active_link")
+     shutdown()
+    }
+    if(!targetStillPresent)forgetUsbEnumeration(device)
+   }
+  }
+  registerReceiver(detachReceiver,IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
+  handles.add(Closeable{unregisterReceiver(detachReceiver)})
+ }
+
+ private fun onUsbPermission(result:IphoneUsbHost.PermissionResult){
+  val pending=authorization?:return
+  val device=result.device
+  if(pending.sequence!=result.requestId||!UsbAttachActivity.sameDevice(pending.device,device)){
+   log("USB_PERMISSION_RESULT","sequence=${pending.sequence} phase=${pending.stage} result=stale_ignored")
+   return
+  }
+  pending.denied=result is IphoneUsbHost.PermissionResult.Denied
+  log("USB_PERMISSION_RESULT","sequence=${pending.sequence} phase=${pending.stage} result=${if(pending.denied)"denied" else "granted"} vendor=${device.vendorId} product=${device.productId} elapsedMs=${SystemClock.elapsedRealtime()-pending.startedAt}")
+  pending.result.countDown()
+ }
  private fun shouldOwnMediaButtons():Boolean =
   !closed && !failed.get() && videoReady && session?.isClosed==false
 
@@ -409,56 +478,87 @@ class WiredService:Service() {
    Thread.sleep(if(elapsed<1000)50 else 250)
   }
  }
- private fun currentAppleDevice(expectedVendorId:Int):UsbDevice? {
+ private fun currentAppleDevice(expected:UsbDevice):UsbDevice? {
   val devices=host.discover()
-  require(devices.size<=1){"Multiple Apple USB devices detected during USB authorization"}
-  return devices.singleOrNull()?.takeIf{it.vendorId==expectedVendorId}
+  devices.firstOrNull{UsbAttachActivity.sameDevice(expected,it)}?.let{return it}
+  if(devices.isEmpty())return null
+  throw IOException("iPhone changed during USB authorization")
  }
  private fun authorize(d:UsbDevice):UsbDevice {
   val reservationDeadline=SystemClock.elapsedRealtime()+TimeUnit.SECONDS.toMillis(45)
-  var current=currentAppleDevice(d.vendorId)
-  while(current==null){
-   check();current=currentAppleDevice(d.vendorId)
-   if(current!=null)break
-   if(SystemClock.elapsedRealtime()>=reservationDeadline)throw IOException("iPhone USB device disappeared before permission could be checked")
-   Thread.sleep(50)
-  }
-  var target:UsbDevice=current?:throw IOException("iPhone USB device disappeared before permission could be checked")
-  if(usb.hasPermission(target)){log("USB_PERMISSION_STATE","state=already_granted phase=$activeDiagnosticStage device=${target.deviceName} vendor=${target.vendorId} product=${target.productId}");return target}
-  var ownsPermissionFlow=false
-  while(!ownsPermissionFlow){
+  while(true){
    check()
-   current=currentAppleDevice(d.vendorId)
-   if(current==null){if(SystemClock.elapsedRealtime()>=reservationDeadline)throw IOException("iPhone USB device disappeared while waiting for permission ownership");Thread.sleep(50);continue}
-   target=current
-   if(usb.hasPermission(target)){log("USB_PERMISSION_STATE","state=granted_while_waiting phase=$activeDiagnosticStage device=${target.deviceName}");return target}
-   ownsPermissionFlow=UsbAttachActivity.beginPermissionFlow()
-   if(!ownsPermissionFlow){if(UsbAttachActivity.consumeRecentActivityPermissionDenial())throw IOException("USB permission was denied in the system prompt");if(SystemClock.elapsedRealtime()>=reservationDeadline)throw IOException("USB permission window remained busy");Thread.sleep(100)}
-  }
-  authorization=CountDownLatch(1);authorizationDenied=false;usbPermissionPending=true;authorizationRequestedAt=SystemClock.elapsedRealtime();authorizationRequestPhase=activeDiagnosticStage;authorizationRequestSequence++
-  try{val requestedDevice=target;val request=host.requestPermission(requestedDevice);val requestType=if(request is IphoneUsbHost.PermissionRequest.AlreadyGranted)"already_granted" else "requested";log("USB_PERMISSION_REQUEST","sequence=$authorizationRequestSequence phase=$authorizationRequestPhase result=$requestType device=${requestedDevice.deviceName} vendor=${requestedDevice.vendorId} product=${requestedDevice.productId}");note("USB_PERMISSION","\u8bf7\u5141\u8bb8\u8f66\u673a USB \u8bbf\u95ee\uff1b\u5982\u679c\u624b\u673a\u63d0\u793a\u4fe1\u4efb\uff0c\u4e5f\u8bf7\u9009\u62e9\u4fe1\u4efb")
-   if(request is IphoneUsbHost.PermissionRequest.AlreadyGranted)return request.device
-   while(true){
-    check()
-    current=currentAppleDevice(d.vendorId)
-    if(current!=null){target=current;if(usb.hasPermission(target)){log("USB_PERMISSION_WAIT","sequence=$authorizationRequestSequence phase=$authorizationRequestPhase result=granted elapsedMs=${SystemClock.elapsedRealtime()-authorizationRequestedAt} reenumerated=${target.deviceName!=requestedDevice.deviceName}");return target}}
-    if(authorizationDenied){AutoUsbService.pause(this);throw IOException("USB permission was denied; automatic retry paused")}
-    if(SystemClock.elapsedRealtime()>=reservationDeadline){log("USB_PERMISSION_WAIT","sequence=$authorizationRequestSequence phase=$authorizationRequestPhase result=timeout elapsedMs=${SystemClock.elapsedRealtime()-authorizationRequestedAt}");throw IOException("USB authorization timed out")}
-    authorization.await(100,TimeUnit.MILLISECONDS)
+   val target=currentAppleDevice(d)
+   if(target!=null&&usb.hasPermission(target)){
+    log("USB_PERMISSION_STATE","state=already_granted phase=$activeDiagnosticStage vendor=${target.vendorId} product=${target.productId}")
+    return target
    }
-  }finally{usbPermissionPending=false;authorizationRequestedAt=0L;UsbAttachActivity.endPermissionFlow(false)}
+   if(SystemClock.elapsedRealtime()>=reservationDeadline)throw IOException("USB authorization timed out")
+   if(target==null){Thread.sleep(50);continue}
+   if(UsbAttachActivity.consumeRecentActivityPermissionDenial(target)){
+    AutoUsbService.pauseForDevice(this,target)
+    throw IOException("USB permission was denied in the system prompt")
+   }
+   if(!UsbAttachActivity.beginPermissionFlow()){Thread.sleep(100);continue}
+   val pending=UsbAuthorization(target,++authorizationRequestSequence,activeDiagnosticStage)
+   authorization=pending
+   usbPermissionPending=true
+   try{
+    val request=host.requestPermission(target,pending.sequence)
+    val immediate=request is IphoneUsbHost.PermissionRequest.AlreadyGranted
+    log("USB_PERMISSION_REQUEST","sequence=${pending.sequence} phase=${pending.stage} result=${if(immediate)"already_granted" else "requested"} vendor=${target.vendorId} product=${target.productId}")
+    if(!immediate)note("USB_PERMISSION","\u8bf7\u5141\u8bb8\u8f66\u673a USB \u8bbf\u95ee\uff1b\u5982\u679c\u624b\u673a\u63d0\u793a\u4fe1\u4efb\uff0c\u4e5f\u8bf7\u9009\u62e9\u4fe1\u4efb")
+    while(true){
+     check()
+     val current=currentAppleDevice(d)
+     val elapsed=SystemClock.elapsedRealtime()-pending.startedAt
+     if(current!=null&&usb.hasPermission(current)){
+      log("USB_PERMISSION_WAIT","sequence=${pending.sequence} phase=${pending.stage} result=granted elapsedMs=$elapsed")
+      return current
+     }
+     if(current!=null&&pending.denied){AutoUsbService.pauseForDevice(this,current);throw IOException("USB permission was denied; automatic retry paused")}
+     if(SystemClock.elapsedRealtime()>=reservationDeadline){
+      log("USB_PERMISSION_WAIT","sequence=${pending.sequence} phase=${pending.stage} result=timeout elapsedMs=$elapsed")
+      throw IOException("USB authorization timed out")
+     }
+     if(pending.result.count!=0L)pending.result.await(100,TimeUnit.MILLISECONDS) else Thread.sleep(100)
+    }
+   }finally{
+    authorization=null
+    usbPermissionPending=false
+    UsbAttachActivity.endPermissionFlow(null)
+   }
+  }
  }
 
  private var phaseAt=SystemClock.elapsedRealtime()
  private var previousPhase="start"
  @Volatile private var activeDiagnosticStage="service_start"
  @Synchronized private fun phase(name:String){val now=SystemClock.elapsedRealtime();activeDiagnosticStage=name;CrashEvidence.updateStage(this,connectionId,name,usbLinked,videoReady);startup.advance(name,now);log("CONNECT_TIMING","completed=$previousPhase durationMs=${now-phaseAt} next=$name");phaseAt=now;previousPhase=name}
- private fun readCarPlayConfiguration(d:UsbDevice):Pair<UsbDevice,LegacyConfiguration?> {
+ private fun readCarPlayConfiguration(d:UsbDevice,expectedPeerKey:String?):Pair<UsbDevice,LegacyConfiguration?>? {
   val authorized=authorize(d)
-  val c=usb.openDevice(authorized)?:return Pair(authorized,null)
-  return try { LegacyUsb.read(authorized,c); Pair(authorized,IphoneCarPlayConfiguration.find(authorized)) } finally { c.close() }
+  val c=usb.openDevice(authorized)?:return null
+  return try {
+   val peerKey=expectedPeerKey?.let{runCatching{WiredPairingPolicy.usbKey(LegacyUsb.boundedSerial(c))}.getOrNull()}
+   if(WiredPairingPolicy.isDifferentUsbPeer(expectedPeerKey,peerKey)){
+    log("USB_MODE","transition candidate belongs to a different iPhone")
+    throw IOException("iPhone changed during CarPlay USB-mode transition")
+   }
+   LegacyUsb.read(authorized,c)
+   val previous=selectedUsbDevice
+   selectedUsbDevice=authorized
+   if(previous!=null&&!UsbAttachActivity.sameDevice(previous,authorized)){
+    AutoUsbService.adoptUsbEnumeration(previous,authorized)
+   }
+   Pair(authorized,IphoneCarPlayConfiguration.find(authorized))
+  }finally{c.close()}
  }
- private fun selectCarPlayConfiguration(initial:UsbDevice):Pair<UsbDevice,LegacyConfiguration> {
+ private fun transitionCandidate(current:UsbDevice):UsbDevice? {
+  val devices=host.discover()
+  return devices.firstOrNull{UsbAttachActivity.sameDevice(current,it)}?:devices.singleOrNull()
+ }
+
+ private fun selectCarPlayConfiguration(initial:UsbDevice,expectedPeerKey:String?):Pair<UsbDevice,LegacyConfiguration> {
   var phone=initial
   var config=IphoneCarPlayConfiguration.find(phone)
   val sessionAlreadyStarted=WiredSessionMemory.startedOn(phone.deviceName)
@@ -476,86 +576,154 @@ class WiredService:Service() {
     }
     WiredConfigurationAction.REJECT -> throw IOException("iPhone exposes no USBMUX+NCM configuration after bounded CarPlay-mode requests")
     WiredConfigurationAction.REQUEST_TRANSITION -> {
-     transitionsTried++
-     phase("usb_reenumeration")
-     note("REENUMERATION","\u6b63\u5728\u8bf7\u6c42iPhone\u5207\u6362CarPlay USB\u6a21\u5f0f")
-     val transitionStarted=SystemClock.elapsedRealtime()
-     var transition:IphoneUsbHost.TransitionResult?=null
-     host.requestCarPlayReenumerationAsync(phone,Executor{it.run()}){transition=it}
-     val outcome=transition?:throw IOException("CarPlay USB-mode request returned no result")
-     if(outcome is IphoneUsbHost.TransitionResult.Failed) {
-      val canFallback=WiredConfigurationAction.fallbackAfterRejection(config!=null,carPlayMode,sessionAlreadyStarted)
-      log("USB_MODE","transition rejected elapsedMs=${SystemClock.elapsedRealtime()-transitionStarted} fallback=$canFallback error=${outcome.error.message?.take(240)}")
-      if(canFallback)return Pair(phone,config!!)
-      throw outcome.error
-     }
-     log("USB_MODE","transition requested elapsedMs=${SystemClock.elapsedRealtime()-transitionStarted} waitLimitMs=$REENUMERATION_WAIT_MS")
-     val waitStarted=SystemClock.elapsedRealtime()
-     val deadline=waitStarted+REENUMERATION_WAIT_MS
-     var sawDetach=false
-     var sameDeviceProbeDone=false
-     var inspectedDeviceName:String?=null
-     var lastCandidate:UsbDevice?=null
-     var lastCandidateConfig:LegacyConfiguration?=null
-     while(SystemClock.elapsedRealtime()<deadline) {
-      check()
-      val devices=host.discover()
-      require(devices.size<=1){"Multiple Apple USB devices detected during CarPlay-mode transition"}
-      val next=devices.singleOrNull()
-      if(next==null) {
-       sawDetach=true
-       Thread.sleep(50)
-       continue
-      }
-      val changedEnumeration=next.deviceName!=phone.deviceName||sawDetach
-      val elapsed=SystemClock.elapsedRealtime()-waitStarted
-      val shouldRead=inspectedDeviceName!=next.deviceName||sawDetach||(!sameDeviceProbeDone&&elapsed>=SAME_ENUMERATION_PROBE_MS)
-      if(shouldRead) {
-      val inspected=readCarPlayConfiguration(next)
-      val inspectedDevice=inspected.first
-      val nextConfig=inspected.second
-       sameDeviceProbeDone=true
-       inspectedDeviceName=next.deviceName
-       sawDetach=false
-       lastCandidate=inspectedDevice
-       lastCandidateConfig=nextConfig
-       val nextCarPlayMode=nextConfig?.let{IphoneCarPlayConfiguration.isCarPlayMode(it)}==true
-       log("USB_MODE","reenumerated=$changedEnumeration device=${next.deviceName} config=${nextConfig?.id?:"none"} appleEthernet=$nextCarPlayMode elapsedMs=$elapsed")
-       if(nextConfig!=null&&nextCarPlayMode)return Pair(inspectedDevice,nextConfig)
-       if(nextConfig!=null&&changedEnumeration) {
-        log("USB_MODE","new enumeration did not expose Apple Ethernet; using fallback after one mode request")
-        return Pair(inspectedDevice,nextConfig)
+      usbReenumerationExpected=true
+      try{
+       transitionsTried++
+       phase("usb_reenumeration")
+       note("REENUMERATION","\u6b63\u5728\u8bf7\u6c42iPhone\u5207\u6362CarPlay USB\u6a21\u5f0f")
+       val transitionStarted=SystemClock.elapsedRealtime()
+       var transition:IphoneUsbHost.TransitionResult?=null
+       host.requestCarPlayReenumerationAsync(phone,Executor{it.run()}){transition=it}
+       val outcome=transition?:throw IOException("CarPlay USB-mode request returned no result")
+       if(outcome is IphoneUsbHost.TransitionResult.Failed) {
+        val canFallback=WiredConfigurationAction.fallbackAfterRejection(config!=null,carPlayMode,sessionAlreadyStarted)
+        log("USB_MODE","transition rejected elapsedMs=${SystemClock.elapsedRealtime()-transitionStarted} fallback=$canFallback error=${outcome.error.message?.take(240)}")
+        if(canFallback)return Pair(phone,config!!)
+        throw outcome.error
        }
-      }
-      Thread.sleep(50)
-     }
-     if(lastCandidate!=null&&lastCandidateConfig!=null) {
-      log("USB_MODE","no mode re-enumeration within wait limit; falling back to available config=${lastCandidateConfig.id}")
-      return Pair(lastCandidate,lastCandidateConfig)
-     }
-     val stillPresent=host.discover().singleOrNull()
-     if(config!=null&&stillPresent!=null) {
-      log("USB_MODE","transition wait ended without replacement descriptors; reusing config=${config.id}")
-      return Pair(phone,config)
-     }
-     if(transitionsTried<maxTransitions&&stillPresent!=null) {
-      phone=stillPresent
-      config=lastCandidateConfig
-      log("USB_MODE","retrying bounded transition count=$transitionsTried")
-      continue
-     }
-     throw IOException("iPhone did not expose USBMUX+NCM after CarPlay-mode transition waitMs=${SystemClock.elapsedRealtime()-waitStarted}")
+       log("USB_MODE","transition requested elapsedMs=${SystemClock.elapsedRealtime()-transitionStarted} waitLimitMs=$REENUMERATION_WAIT_MS")
+       val waitStarted=SystemClock.elapsedRealtime()
+       val deadline=waitStarted+REENUMERATION_WAIT_MS
+       var sawDetach=false
+       var settledDeviceProbeDone=false
+       var lastCandidate:UsbDevice?=null
+       var lastCandidateConfig:LegacyConfiguration?=null
+       while(SystemClock.elapsedRealtime()<deadline) {
+        check()
+        val next=transitionCandidate(lastCandidate?:phone)
+        if(next==null) {
+         sawDetach=true
+         Thread.sleep(50)
+         continue
+        }
+        val changedEnumeration=!UsbAttachActivity.sameDevice(phone,next)||sawDetach
+        val elapsed=SystemClock.elapsedRealtime()-waitStarted
+        val probeAfterSettle=!changedEnumeration&&!settledDeviceProbeDone&&elapsed>=SAME_ENUMERATION_PROBE_MS
+        if(!UsbAttachActivity.sameDevice(lastCandidate,next)||sawDetach||probeAfterSettle) {
+         val inspectedConfig=readCarPlayConfiguration(next,expectedPeerKey)
+         if(inspectedConfig==null){
+          // Android can publish the new enumeration just before its USB node opens.
+          Thread.sleep(100)
+          continue
+         }
+         val (inspected,nextConfig)=inspectedConfig
+         if(probeAfterSettle)settledDeviceProbeDone=true
+         sawDetach=false
+         lastCandidate=inspected
+         lastCandidateConfig=nextConfig
+         val nextCarPlayMode=nextConfig?.let{IphoneCarPlayConfiguration.isCarPlayMode(it)}==true
+         log("USB_MODE","reenumerated=$changedEnumeration device=${next.deviceName} config=${nextConfig?.id?:"none"} appleEthernet=$nextCarPlayMode elapsedMs=$elapsed")
+         if(nextConfig!=null&&nextCarPlayMode)return Pair(inspected,nextConfig)
+         if(nextConfig!=null&&changedEnumeration) {
+          log("USB_MODE","new enumeration did not expose Apple Ethernet; using fallback after one mode request")
+          return Pair(inspected,nextConfig)
+         }
+        }
+        Thread.sleep(50)
+       }
+       val stillPresent=transitionCandidate(lastCandidate?:phone)
+       if(lastCandidate!=null&&lastCandidateConfig!=null&&UsbAttachActivity.sameDevice(lastCandidate,stillPresent)) {
+        log("USB_MODE","no mode re-enumeration within wait limit; falling back to available config=${lastCandidateConfig.id}")
+        return Pair(lastCandidate,lastCandidateConfig)
+       }
+       if(config!=null&&UsbAttachActivity.sameDevice(phone,stillPresent)) {
+        log("USB_MODE","transition wait ended without replacement descriptors; reusing config=${config.id}")
+        return Pair(phone,config)
+       }
+       if(transitionsTried<maxTransitions&&stillPresent!=null) {
+        val (inspected,nextConfig)=readCarPlayConfiguration(stillPresent,expectedPeerKey)
+         ?:throw IOException("Cannot open iPhone USB after the CarPlay-mode transition")
+        phone=inspected
+        config=nextConfig
+        log("USB_MODE","retrying bounded transition count=$transitionsTried")
+        continue
+       }
+       throw IOException("iPhone did not expose USBMUX+NCM after CarPlay-mode transition waitMs=${SystemClock.elapsedRealtime()-waitStarted}")
+      }finally{usbReenumerationExpected=false}
     }
    }
   }
  }
+
+ private fun openCarKit(
+  store:IdentityStore, mux:Iap2UsbMuxHost, usbSession:Iap2UsbSession
+ ):BlockingDuplexByteStream {
+  val label="DiPlay API17"
+  val pairing=LockdownPairingClient(mux,onDiagnostic={log("LOCKDOWN",it)})
+  val usbKey=runCatching{WiredPairingPolicy.usbKey(usbSession.serialNumber())}.getOrNull()
+  val usbRecord=usbKey?.let(store::loadPair)
+  val oldRecord=if(usbRecord==null)store.loadLegacyPair() else null
+  val devicePublicKey=if(usbKey==null||oldRecord!=null){
+   try{pairing.readDevicePublicKey(label){closed}}catch(e:Exception){
+    check()
+    log("LOCKDOWN_PAIRING","stage=identity result=public_key_unavailable errorType=${e.javaClass.simpleName}")
+    null
+   }
+  }else null
+  val publicScope=devicePublicKey?.let(WiredPairingPolicy::publicKey)
+  val scope=usbKey?:publicScope
+  val scopedRecord=usbRecord?:publicScope?.let(store::loadPair)
+  val legacyMatches=oldRecord!=null&&devicePublicKey!=null&&
+   WiredPairingPolicy.matchesPublicKey(oldRecord.devicePublicKeyPem,devicePublicKey)
+  val cached=scopedRecord?:oldRecord?.takeIf{legacyMatches}
+  val source=when{
+   usbRecord!=null->"usb_cache"
+   scopedRecord!=null->"public_key_cache"
+   cached!=null->"verified_legacy"
+   else->"new_peer"
+  }
+  log("LOCKDOWN_PAIRING","stage=identity result=$source")
+  note("PAIRING",if(cached!=null)"正在使用已保存的 iPhone 配对信息" else "首次配对，请保持 iPhone 解锁并确认信任")
+  val client=LockdownCarKitClient(mux)
+  if(cached!=null){
+   phase("carkit_tls");check()
+   try{
+    val carkit=client.open(cached,label)
+    // Save the migration only after the phone accepted its verified record.
+    if(usbRecord==null&&scope!=null)try{store.savePair(scope,cached)}catch(e:Exception){
+     log("LOCKDOWN_PAIRING","stage=cache result=write_failed errorType=${e.javaClass.simpleName}")
+    }
+    return carkit
+   }catch(e:Exception){
+    check()
+    if(!WiredPairingPolicy.needsRepair(e))throw e
+    val rejectedScope=if(usbRecord!=null)usbKey else if(scopedRecord!=null)publicScope else null
+    if(rejectedScope!=null)store.clearPair(rejectedScope)
+    log("LOCKDOWN_PAIRING","stage=carkit_tls result=credential_rejected errorType=${e.javaClass.simpleName}")
+    note("PAIRING_RETRY","此 iPhone 的配对已失效，请重新确认信任")
+   }
+  }
+  phase("lockdown_pairing")
+  val record=pairing.pair(label,store.hostId,store.buid,90000,isCancelled={closed}).pairRecord
+  check()
+  val newScope=usbKey?:WiredPairingPolicy.publicKey(record.devicePublicKeyPem)
+  try{store.savePair(newScope,record)}catch(e:Exception){
+   log("LOCKDOWN_PAIRING","stage=cache result=write_failed errorType=${e.javaClass.simpleName}")
+  }
+  phase("carkit_tls");check()
+  return client.open(record,label)
+ }
+
  private fun connect(){
   phase("usb_discovery")
-  val discovered=selectPhone();UsbPresenceLog.recordTransition(this,"selected",discovered);UsbPresenceLog.capture(this,"selected_phone");phase("usb_permission");val d=authorize(discovered);check();phase("descriptors")
+  val discovered=selectPhone();selectedUsbDevice=discovered;UsbPresenceLog.recordTransition(this,"selected",discovered);UsbPresenceLog.capture(this,"selected_phone");phase("usb_permission");val d=authorize(discovered);check();phase("descriptors")
   val initial=usb.openDevice(d)?:throw IOException("无法打开iPhone USB")
-  val configs=try{LegacyUsb.read(d,initial)}finally{initial.close()}
+  val (configs,initialPeerKey)=try{
+   val peerKey=runCatching{WiredPairingPolicy.usbKey(LegacyUsb.boundedSerial(initial))}.getOrNull()
+   Pair(LegacyUsb.read(d,initial),peerKey)
+  }finally{initial.close()}
   log("DESCRIPTORS",configs.joinToString { "config=${it.id}:"+IphoneCarPlayConfiguration.describe(it) })
-  val selected=selectCarPlayConfiguration(d)
+  val selected=selectCarPlayConfiguration(d,initialPeerKey)
   val phone=selected.first
   phase("configuration_takeover");check();val config=selected.second
   note("USB_TAKEOVER","正在检查iPhone USB占用并选择CarPlay配置")
@@ -566,14 +734,15 @@ class WiredService:Service() {
   val usbSession=us?:throw IOException("USBMUX打开失败");own(usbSession,"usbmux_usb")
   phase("ncm_open");val fn=NcmFunctionDiscovery.find(config)?:throw IOException("NCM功能缺失")
   val nc=usb.openDevice(phone)?:throw IOException("NCM USB打开失败")
-  val ncm=try{NcmUsbBridge.open(nc,fn,profile=usbProfile,probe=usbBatchId.isNotEmpty(),onDiagnostic={log("NCM",it)})}catch(e:Throwable){nc.close();throw e};own(ncm,"ncm_usb");ncm.startEarlyReceive();usbLinked=true
+  val ncm=try{NcmUsbBridge.open(nc,fn,profile=usbProfile,probe=usbBatchId.isNotEmpty(),onDiagnostic={log("NCM",it)})}catch(e:Throwable){nc.close();throw e};own(ncm,"ncm_usb");ncm.startEarlyReceive();selectedUsbDevice=phone;usbLinked=true
   phase("userland_ipv6_stack");log("NETWORK_BACKEND","backend=lwip_userland_ncm vpnUsed=false ipv4=false ipv6=true tcp=true udp=true mtu=1500 hostMacAvailable=${ncm.hostMac!=null}");val nativeReadyBeforeUse=ConnectionPrewarm.nativeReady();val nativeCrashFile=java.io.File(filesDir,"native-crash.txt");val nativeCapture=NativeIpStack.installCrashCapture(nativeCrashFile.absolutePath);NativeIpStack.setCrashStage("lwip_create_before");log("CONNECTION_PREWARM","at=native_before_create readyBeforeUse=$nativeReadyBeforeUse nativeStatus=${ConnectionPrewarm.nativePrewarmStatus()}");log("USERLAND_NETWORK","native crash capture armed=$nativeCapture")
   val mac=ncm.hostMac?:byteArrayOf(2,0,0,0,0,17);val macText=mac.joinToString(":"){"%02x".format(it.toInt() and 255)}
   val network=UserlandNcmNetwork(ncm,mac,{line->log(if(line.startsWith("NCM_OUT "))"NCM_WRITE_TIMING" else "USERLAND_NETWORK",line)},trackedTcpSynPort=AIRPLAY_CONTROL_PORT){fail(it,"userland_network")};own(network,"lwip_userland_network");val nativeStackStartAt=SystemClock.elapsedRealtime();var nativeStackStartResult="ready";try{network.start()}catch(error:Throwable){nativeStackStartResult="failed_${error.javaClass.simpleName.take(40)}";throw error}finally{log("CONNECTION_PREWARM","at=native_start_complete readyBeforeUse=$nativeReadyBeforeUse networkStartDurationMs=${SystemClock.elapsedRealtime()-nativeStackStartAt} result=$nativeStackStartResult")};if(usbProfile==UsbStartupProfile.DEFAULT)network.startNeighborWarmup();userlandNetwork=network
   phase("usbmux_handshake");val mux=Iap2UsbMuxHost.open(usbSession,onDiagnostic={line->log(if(line.startsWith("USBMUX_OUT "))"USBMUX_WRITE_TIMING" else "MUX",line)});own(mux,"usbmux_host")
   phase("lockdown_pairing")
-  val identityReadyBeforeUse=ConnectionPrewarm.identityReady();val identityCallAt=SystemClock.elapsedRealtime();val store=ConnectionPrewarm.identityStore(this);log("CONNECTION_PREWARM","at=identity_use readyBeforeUse=$identityReadyBeforeUse waitMs=${SystemClock.elapsedRealtime()-identityCallAt}");val savedPair=store.loadPair();log("LOCKDOWN","saved_pair_present=${savedPair!=null} profile=2");note("PAIRING",if(savedPair!=null)"正在使用已保存的 iPhone 配对信息" else "首次配对，请保持 iPhone 解锁并确认信任");var pair=savedPair?:LockdownPairingClient(mux,onDiagnostic={log("LOCKDOWN",it)}).pair("DiPlay API17",store.hostId,store.buid,90000,isCancelled={closed}).pairRecord.also{store.savePair(it)}
-  phase("carkit_tls");check();val carkit=try{LockdownCarKitClient(mux).open(pair,"DiPlay API17")}catch(e:Exception){var cause:Throwable?=e;var rejected=false;while(cause!=null){val m=cause.message.orEmpty();if(m.contains("InvalidPairRecord",true)||m.contains("InvalidHostID",true))rejected=true;cause=cause.cause};if(!rejected)throw e;store.clearPair();note("PAIRING_RETRY","保存的配对已失效，请在iPhone上重新确认信任");pair=LockdownPairingClient(mux,onDiagnostic={log("LOCKDOWN",it)}).pair("DiPlay API17",store.hostId,store.buid,90000,isCancelled={closed}).pairRecord.also{store.savePair(it)};LockdownCarKitClient(mux).open(pair,"DiPlay API17")};own(carkit,"carkit")
+  val identityReadyBeforeUse=ConnectionPrewarm.identityReady();val identityCallAt=SystemClock.elapsedRealtime();val store=ConnectionPrewarm.identityStore(this)
+  log("CONNECTION_PREWARM","at=identity_use readyBeforeUse=$identityReadyBeforeUse waitMs=${SystemClock.elapsedRealtime()-identityCallAt}")
+  val carkit=openCarKit(store,mux,usbSession);own(carkit,"carkit")
   phase("iap2_setup");note("CARKIT","iPhone CarKit通道已打开，正在建立协议会话")
   val csm=Iap2Session.open(carkit,traceContext="api17",onTrace={log("IAP2",it)});own(csm,"iap2")
   phase("mfi_identity");val auth=VerifiedMfiCache.get(this){log("MFI","challenge signed bytes=$it")}
@@ -581,7 +750,7 @@ class WiredService:Service() {
   // API17 has no per-app VPN routing. Only the USB link-local /64 is routed; no default/DNS routes.
   phase("airplay_listener");val configAir=AirPlayConfig("DiPlay API17",macText,macText,"320.20",AirPlayDisplayConfig(ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,fps=selectedFps),microphone=true)
   val preferredDecoder=if(Build.VERSION.SDK_INT==17&&"freescale".equals(Build.MANUFACTURER,true)&&"mx9a0".equals(Build.MODEL,true))mx9a0AvcDecoder else null
-  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,preferredDecoder,{log("MEDIA",it);if(!closed&&!videoReady&&it=="video_rendered_frames=1"){videoReady=true;refreshMediaButtonOwner();activeDiagnosticStage="video_active";CrashEvidence.updateStage(this@WiredService,connectionId,"video_active",usbLinked,true);startup.firstFrame(SystemClock.elapsedRealtime());reportStartup("first_frame");note("VIDEO_READY","已收到并解码CarPlay画面；按返回键显示控制面板")}});renderer.onVideoFailure={fail(IOException("video decode failure",it),"video_decoder")};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
+  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,preferredDecoder,{log("MEDIA",it);if(it=="video_rendered_frames=1")onFirstVideoFrame()});renderer.onVideoFailure={fail(IOException("video decode failure",it),"video_decoder")};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
   val media=CarPlayMediaEngine(renderer,true);val pairings=store.pairings()
   val srv=LegacySockets.tcp(InetAddress.getByName("fe80::2"),AIRPLAY_CONTROL_PORT);own(Closeable{srv.close()},"airplay_listener");server=srv;log("NETWORK_LISTENER","service=airplay_control family=ipv6 localPort=${srv.localPort} backend=${if(LegacySockets.isUserlandActive())"lwip" else "android"}")
   Thread({try{while(!closed){val socket=srv.accept();airplayTcpAccepted.set(true);log("AIRPLAY_ACCEPT","control TCP accepted");if(!videoReady){phase("airplay_handshake");note("AIRPLAY_HANDSHAKE","投屏通道已连通，正在建立音视频会话")};try{socket.tcpNoDelay=true;socket.keepAlive=true;if(closed){socket.close();break};if(sessions.size>=4){socket.close();continue};val s=AirPlaySession(socket,configAir,identity,pairings,auth,listener,media);val accepted=synchronized(resourceLock){if(closed)false else{sessions.add(s);s.start();true}};if(!accepted)s.close()}catch(e:Throwable){runCatching{socket.close()};throw e}}}catch(e:Throwable){if(!closed)fail(e,"airplay_accept")}},"legacy-airplay").start()
@@ -662,7 +831,10 @@ class WiredService:Service() {
     startWatchdog.startSessionSentAgain()
    }
    log("START_SESSION_QUEUE","phase=begin attempt=${startSessionQueueAttempts.incrementAndGet()}")
-  },onSessionStartFlushed={firstStartFlushedAt.compareAndSet(0L,System.nanoTime())},onSessionStartSent={WiredSessionMemory.started(phone.deviceName);network.startOutbound()},startSessionAgain=retryDecision)
+  },onSessionStartFlushed={firstStartFlushedAt.compareAndSet(0L,System.nanoTime())},onSessionStartSent={
+   val active=synchronized(resourceLock){if(closed)false else{WiredSessionMemory.started(phone.deviceName);true}}
+   if(active)network.startOutbound()
+  },startSessionAgain=retryDecision)
   if(!closed&&controlResult.terminal==Iap2WiredControlTerminal.CARPLAY_UNAVAILABLE){
    log("CONTROL_END","terminal=carplay_unavailable stage=${controlResult.stage} sessions=${controlResult.carPlayStartSessionsSent}")
    log("START_SESSION_QUEUE","phase=availability result=carplay_unavailable stage=${controlResult.stage}")
@@ -676,7 +848,7 @@ class WiredService:Service() {
   refreshMediaButtonOwner()
   wiredStartWatchdog?.terminate();wiredStartWatchdog=null
   note("DISCONNECTED","CarPlay 已断开，正在释放连接");
-  reportStartup(if(videoReady)"released_after_video" else "ended_before_video");audioObserver?.close();wheelControl?.close();usbLinked=false;authorization.countDown();watchdog.shutdownNow();work.shutdownNow();input.shutdownNow()
+  reportStartup(if(videoReady)"released_after_video" else "ended_before_video");audioObserver?.close();wheelControl?.close();usbLinked=false;authorization?.result?.countDown();watchdog.shutdownNow();work.shutdownNow();input.shutdownNow()
   log("RELEASE_BEGIN","handles=${owned.size} sessions=${sessions.size}")
   val pending=java.util.concurrent.atomic.AtomicBoolean(true)
   Handler(Looper.getMainLooper()).postDelayed({if(pending.get()){log("RELEASE_TIMEOUT","cleanup still running after 12 seconds");for((thread,stack) in Thread.getAllStackTraces())if(thread.name.startsWith("legacy-")||thread.name.startsWith("api17-")||thread.name.startsWith("ncm-"))log("RELEASE_TIMEOUT","thread=${thread.name} state=${thread.state} at=${stack.take(5).joinToString()}")}},12000)

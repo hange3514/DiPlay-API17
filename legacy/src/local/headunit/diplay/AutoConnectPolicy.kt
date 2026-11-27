@@ -19,6 +19,11 @@ class AutoConnectPolicy {
  fun launchPending(now:Long)=launchUntil>now
  fun pause(){paused=true;launchUntil=0}
  fun manualResume(){paused=false;failures=0;nextAttempt=0;launchUntil=0}
+ /** A new idle USB enumeration has a first attempt even when retries are disabled. */
+ fun deviceReplaced(now:Long){
+  manualResume()
+  attached=true;absentSince=-1;stableSince=now;busyBefore=false;readyAt=0;hasReady=false
+ }
  /** A first frame proves startup, not a stable session; only a long-lived session clears backoff. */
  fun ready(now:Long){if(!hasReady){readyAt=now;hasReady=true};launchUntil=0}
  /** Meet a pending debounce/backoff deadline without increasing the idle USB scan rate. */
@@ -32,7 +37,7 @@ class AutoConnectPolicy {
   }
   return (deadline-now).coerceIn(100,2000)
  }
- @JvmOverloads fun poll(now:Long,present:Boolean,busy:Boolean,allowReconnect:Boolean=true,persistentPause:Boolean=false):Boolean {
+ @JvmOverloads fun poll(now:Long,present:Boolean,busy:Boolean,allowReconnect:Boolean=true,persistentPause:Boolean=false,sessionBusy:Boolean=busy):Boolean {
   // A crash guard is stored outside this in-memory state machine. Keep it authoritative:
   // transient USB disappearance may reset connection state, but must never clear the guard.
   if(persistentPause){paused=true;launchUntil=0}
@@ -40,11 +45,11 @@ class AutoConnectPolicy {
    if(absentSince<0)absentSince=now
    // Never treat an active iPhone re-enumeration as a new insertion.
    if(!busy&&now-absentSince>=2000){attached=false;if(!persistentPause)paused=false;failures=0;launchUntil=0;nextAttempt=0;readyAt=0;hasReady=false}
-   busyBefore=busy;return false
+   busyBefore=sessionBusy;return false
   }
   absentSince=-1
   if(!attached){attached=true;stableSince=now}
-  if(busy){busyBefore=true;launchUntil=0;return false}
+  if(busy){if(sessionBusy){busyBefore=true;launchUntil=0};return false}
   if(busyBefore){
    busyBefore=false;launchUntil=0
    if(hasReady&&now-readyAt>=stableConnectionMs){failures=0;nextAttempt=0}

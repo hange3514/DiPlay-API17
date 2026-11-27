@@ -17,6 +17,21 @@ class LockdownPairingClient(
     private val onDiagnostic: (String) -> Unit = {},
 ) {
     private fun diagnostic(text:String){runCatching{onDiagnostic(text)}}
+
+    /** Fetches the public identity used to check an older unscoped record before migrating it. */
+    internal fun readDevicePublicKey(label: String, isCancelled: () -> Boolean): ByteArray {
+        val deadline = Deadline(MAXIMUM_STEP_TIMEOUT_MILLIS)
+        checkCancelled(isCancelled)
+        val connection = host.connect(
+            destinationPort = Iap2UsbMuxHost.LOCKDOWN_PORT,
+            timeoutMillis = stepTimeoutMillis(deadline),
+        )
+        return LockdownPlistChannel(connection).use { channel ->
+            (getValue(channel, label, "DevicePublicKey", deadline, isCancelled) as? LockdownPlistValue.Data)?.bytes
+                ?.takeIf { it.isNotEmpty() }
+                ?: throw LockdownPairingException.InvalidResponse("DevicePublicKey was not data")
+        }
+    }
     /**
      * Fetches the two pairing inputs, generates the local record, and sends plaintext Pair.
      *

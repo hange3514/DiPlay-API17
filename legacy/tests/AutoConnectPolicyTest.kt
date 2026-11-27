@@ -2,6 +2,32 @@ package local.headunit.diplay
 import org.junit.Assert.*
 import org.junit.Test
 class AutoConnectPolicyTest {
+ @Test fun anotherPhoneHasAFirstAttemptEvenAfterOldPhoneWasPaused(){
+  val p=AutoConnectPolicy()
+  assertFalse(p.poll(0,true,false,false))
+  assertTrue(p.poll(800,true,false,false))
+  p.pause()
+  p.poll(900,true,true,false)
+  assertFalse(p.poll(1000,true,false,false))
+  p.deviceReplaced(1100)
+  assertFalse(p.poll(1899,true,false,false))
+  assertTrue(p.poll(1900,true,false,false))
+ }
+ @Test fun newPhoneCannotClearPersistedCrashGuard(){
+  val p=AutoConnectPolicy()
+  p.deviceReplaced(1100)
+  assertFalse(p.poll(1900,true,false,true,true))
+  assertTrue(p.isPaused())
+ }
+ @Test fun permissionActivityDoesNotConsumeTheReplacementPhonesFirstAttempt(){
+  val p=AutoConnectPolicy()
+  p.deviceReplaced(100)
+  assertFalse(p.poll(1400,true,true,false,sessionBusy=false))
+  assertTrue(p.poll(1500,true,false,false,sessionBusy=false))
+  p.poll(1600,true,true,false,sessionBusy=true)
+  assertFalse(p.poll(1700,true,false,false,sessionBusy=false))
+  assertFalse(p.poll(4800,true,false,false,sessionBusy=false))
+ }
  @Test fun noPhoneDoesNotLaunch(){val p=AutoConnectPolicy();for(n in 0L..10000L step 1000)assertFalse(p.poll(n,false,false))}
  @Test fun attachDebouncedAndLaunchDeduplicated(){val p=AutoConnectPolicy();assertFalse(p.poll(0,true,false));assertTrue(p.poll(800,true,false));assertFalse(p.poll(900,true,false));assertFalse(p.poll(5000,true,true));assertFalse(p.poll(9000,true,true))}
  @Test fun failureWaitsBeforeRetry(){val p=AutoConnectPolicy();p.poll(0,true,false);p.poll(800,true,false);p.poll(900,true,true);assertFalse(p.poll(1000,true,false));assertFalse(p.poll(3999,true,false));assertTrue(p.poll(4000,true,false))}

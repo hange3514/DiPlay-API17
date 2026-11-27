@@ -74,6 +74,21 @@ internal object UsbDescriptorReader {
 object LegacyUsb {
  private var deviceName=""
  private var cached:List<LegacyConfiguration> = emptyList()
+ /** USB serial is optional evidence. Avoid API17 getSerial(), which issues timeout-zero USB control requests. */
+ fun boundedSerial(c:UsbDeviceConnection):String? {
+  val raw=c.rawDescriptors?:return null
+  if(raw.size<18||raw[1].toInt()!=1)return null
+  val serialIndex=raw[16].toInt() and 255
+  if(serialIndex==0)return null
+  val language=ByteArray(4)
+  if(c.controlTransfer(0x80,6,0x300,0,language,language.size,150)!=4||language[1].toInt()!=3)return null
+  val languageId=(language[2].toInt() and 255) or ((language[3].toInt() and 255) shl 8)
+  val serial=ByteArray(255)
+  val count=c.controlTransfer(0x80,6,0x300 or serialIndex,languageId,serial,serial.size,150)
+  val length=serial[0].toInt() and 255
+  if(serial[1].toInt()!=3||length<4||length%2!=0||length>count)return null
+  return String(serial,2,length-2,Charsets.UTF_16LE)
+ }
  fun currentConfiguration(c:UsbDeviceConnection):Int {val b=ByteArray(1);return if(c.controlTransfer(0x80,8,0,0,b,1,1500)==1)b[0].toInt() and 255 else -5}
  fun driver(c:UsbDeviceConnection,id:Int):UsbDriver {val out=ByteArray(256);val rc=NativeUsb.driver(c.fileDescriptor,id,out);return if(rc==0)UsbDriver(String(out,Charsets.US_ASCII).substringBefore('\u0000'))else UsbDriver(error=rc)}
  @Synchronized fun read(device:UsbDevice,connection:UsbDeviceConnection):List<LegacyConfiguration> {

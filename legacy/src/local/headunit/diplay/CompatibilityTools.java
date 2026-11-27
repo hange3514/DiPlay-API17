@@ -13,6 +13,7 @@ import android.os.Environment;
 import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.WindowManager;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -26,8 +27,10 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -37,6 +40,9 @@ final class CompatibilityTools {
     private static final String API = "http://next.hzy.cloud:20001/diplay/v1";
     private static final String PREFS = "diplay_compatibility";
     private static final String CONSENT_VERSION = "0.44.19-airplay-raw-failure-beta";
+    private static final String PENDING_CARLIFE = "pending_carlife_attachments";
+    private static final int MAX_PENDING_CARLIFE = 16;
+    private static final AtomicBoolean REPORT_RUNNING = new AtomicBoolean();
     private static final int MAX_APK = 20 * 1024 * 1024;
     private static final Pattern SAFE_TOKEN = Pattern.compile("[A-Za-z0-9_.:/-]{1,48}");
     private static final Pattern SAFE_ALSA_PATH = Pattern.compile("/dev/snd/pcmC[0-9]{1,3}D[0-9]{1,3}c");
@@ -96,12 +102,18 @@ final class CompatibilityTools {
     }
 
     static void open(final MainActivity activity) {
-        final String[] options = new String[] {"车型匹配与版本历史", "提交问题说明和诊断", "上传范围与隐私说明"};
+        if (activity.busy || activity.closed) return;
+        final List<String> pending = PendingAttachmentReports.read(
+            activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PENDING_CARLIFE, ""));
+        final String[] options = pending.isEmpty()
+            ? new String[] {"车型匹配与版本历史", "提交问题说明和诊断", "上传范围与隐私说明"}
+            : new String[] {"车型匹配与版本历史", "提交问题说明和诊断", "上传范围与隐私说明", "补传 CarLife 附件"};
         new AlertDialog.Builder(activity).setTitle("车型兼容")
             .setItems(options, new DialogInterface.OnClickListener() { public void onClick(DialogInterface dialog, int which) {
                 if (which == 0) requireConsent(activity, new Runnable() { public void run() { showCatalog(activity); } });
                 else if (which == 1) requireConsent(activity, new Runnable() { public void run() { askIssue(activity); } });
-                else showPrivacy(activity);
+                else if (which == 2) showPrivacy(activity);
+                else requireConsent(activity, new Runnable() { public void run() { chooseCarLifeRetry(activity, pending); } });
             }}).setNegativeButton("关闭", null).show();
     }
 
@@ -165,7 +177,8 @@ final class CompatibilityTools {
     }
 
     private static void showPrivacy(Activity activity) {
-        new AlertDialog.Builder(activity).setTitle("发送哪些数据").setMessage(privacyText())
+        new AlertDialog.Builder(activity).setTitle("发送哪些数据").setMessage(privacyText() +
+                "\n\n安装了原厂百度 CarLife 的 API 17 车机可以随反馈附带 CarLife 安装包及可读取的同名 ODEX，供方向盘按键适配分析。提交时可取消勾选。附件与报告关联，安装包之外的 CarLife 应用数据不会读取。")
             .setPositiveButton("知道了", null)
             .setNegativeButton("撤回上传同意", new DialogInterface.OnClickListener() { public void onClick(DialogInterface dialog, int which) {
                 activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("consent").remove("consent_version").commit();
@@ -301,10 +314,10 @@ final class CompatibilityTools {
     }
 
     private static void askIssue(final MainActivity activity) {
-        askIssue(activity, "");
+        askIssue(activity, "", true);
     }
 
-    private static void askIssue(final MainActivity activity, String draft) {
+    private static void askIssue(final MainActivity activity, String draft, boolean attachPreviouslySelected) {
         final EditText input = new EditText(activity);
         input.setSingleLine(false);
         input.setMinLines(2);
@@ -320,6 +333,20 @@ final class CompatibilityTools {
         box.setPadding(pad, pad, pad, 0);
         box.addView(hint);
         box.addView(input);
+        final CheckBox carLife = new CheckBox(activity);
+        if (CarLifeArtifactUpload.hasCarLife(activity)) {
+            carLife.setText("附带原厂百度 CarLife 安装包，用于分析方向盘按键");
+            final String saved = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PENDING_CARLIFE, "");
+            boolean canAddAttachment = PendingAttachmentReports.read(saved).size() < MAX_PENDING_CARLIFE;
+            carLife.setEnabled(canAddAttachment);
+            carLife.setChecked(canAddAttachment && attachPreviouslySelected);
+            box.addView(carLife);
+            if (!canAddAttachment) {
+                TextView pendingHint = new TextView(activity);
+                pendingHint.setText("待补传的附件较多。仍可提交报告，也可先在问题反馈中补传附件。");
+                box.addView(pendingHint);
+            }
+        }
 
         final AlertDialog dialog = new AlertDialog.Builder(activity).setTitle("描述遇到的问题")
             .setView(box).setPositiveButton("继续", null).setNegativeButton("取消", null).show();
@@ -330,24 +357,24 @@ final class CompatibilityTools {
                     input.setError(issue.isEmpty() ? "请填写问题现象" : "问题说明最多 1000 个字符");
                     return;
                 }
+                final boolean attachCarLife = carLife.isChecked();
                 dialog.dismiss();
                 new AlertDialog.Builder(activity).setTitle("确认提交")
-                    .setMessage("将问题说明和自动采集的诊断发送到维护者的服务器。诊断范围请见上传说明。公网传输使用 HTTP。")
+                    .setMessage("将问题说明和自动采集的诊断发送到维护者的服务器。诊断范围请见上传说明。公网传输使用 HTTP。" +
+                        (attachCarLife ? "\n\n报告收到后会单独传送原厂百度 CarLife 的 APK 和可读取的同名 ODEX，用于方向盘按键适配。" : ""))
                     .setPositiveButton("确认提交", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface ignored, int button) { sendReport(activity, issue); }
+                        @Override public void onClick(DialogInterface ignored, int button) { sendReport(activity, issue, attachCarLife); }
                     })
                     .setNegativeButton("返回修改", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface ignored, int button) { askIssue(activity, issue); }
+                        @Override public void onClick(DialogInterface ignored, int button) { askIssue(activity, issue, attachCarLife); }
                     }).show();
             }
         });
     }
 
-    private static void sendReport(final MainActivity activity, final String issue) {
-        if (activity.busy || activity.closed) return;
-        activity.busy = true;
-        activity.showOperation("正在筛选并提交兼容性报告…");
-        activity.worker.execute(new Runnable() { public void run() {
+    private static void sendReport(final MainActivity activity, final String issue, final boolean includeCarLife) {
+        if (!beginReportJob(activity, "正在筛选并提交兼容性报告…")) return;
+        try { activity.worker.execute(new Runnable() { public void run() {
             try {
                 UsbPresenceLog.recordCurrentPhones(activity, "report_submit");
                 FilteredEvents filtered = filterEvents(MainActivity.snapshot(activity));
@@ -356,19 +383,119 @@ final class CompatibilityTools {
                 CompatibilityEvidence.appendIdentity(filtered.events, VehicleIdentityEvidence.collect(activity));
                 JSONObject body = new JSONObject().put("profile", profile(activity)).put("appVersion", version)
                     .put("issue", issue).put("events", filtered.events).put("alsaEnvironment", alsaEnvironment);
+                if (includeCarLife) body.put("carLifeArtifactsRequested", true)
+                    .put("carLifeMetadata", CarLifeArtifactUpload.carLifeMetadata(activity));
                 JSONObject receipt = post("/report", body);
-                if (!receipt.optString("id").matches("[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}") ||
+                String reportId = receipt.optString("id");
+                if (!PendingAttachmentReports.isReportId(reportId) ||
                     receipt.optInt("events", -1) != filtered.events.length()) {
                     throw new java.io.IOException("服务器回执与本次报告不匹配");
                 }
-                final String message = "提交成功。报告编号：" + receipt.optString("id") +
-                    "\n上传事件：" + receipt.optInt("events") + " 条；已清除本次上传的本地记录，未上传或并发新增记录保留。服务器报告保留至手动清理；车机本地日志最多保留 24 小时。";
-                MainActivity.acknowledge(activity, filtered.acknowledgedRows);
-                activity.runOnUiThread(new Runnable() { public void run() {
-                    activity.busy = false;
-                    if (!activity.closed) new AlertDialog.Builder(activity).setTitle("已收到").setMessage(message).setPositiveButton("确定", null).show();
-                }});
+                boolean retrySaved = includeCarLife && saveCarLifeRetry(activity, reportId);
+                String message = "提交成功。报告编号：" + reportId + "\n上传事件：" + receipt.optInt("events") + " 条。";
+                try {
+                    MainActivity.acknowledge(activity, filtered.acknowledgedRows);
+                    message += "\n已清除本次确认上传的本地记录，未上传或并发新增记录保留。";
+                } catch (Exception cleanupFailure) {
+                    message += "\n服务器已保存报告，本地记录暂未清理。";
+                }
+                if (includeCarLife) message += uploadCarLife(activity, reportId, retrySaved);
+                showReportResult(activity, "已收到", message);
             } catch (final Exception e) { finishError(activity, "报告提交失败；本地诊断日志保留未改动", e); }
+            finally { REPORT_RUNNING.set(false); }
+        }}); } catch (RuntimeException e) {
+            REPORT_RUNNING.set(false);
+            finishError(activity, "报告提交未启动", e);
+        }
+    }
+
+    private static boolean beginReportJob(MainActivity activity, String status) {
+        if (activity.busy || activity.closed || activity.isFinishing()) return false;
+        if (!REPORT_RUNNING.compareAndSet(false, true)) {
+            activity.showOperation("已有报告任务正在结束，请稍后再试。");
+            return false;
+        }
+        activity.busy = true;
+        activity.showOperation(status);
+        return true;
+    }
+
+    private static boolean saveCarLifeRetry(Context context, String reportId) {
+        try {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            String pending = prefs.getString(PENDING_CARLIFE, "");
+            return PendingAttachmentReports.read(pending).size() < MAX_PENDING_CARLIFE &&
+                prefs.edit().putString(PENDING_CARLIFE, PendingAttachmentReports.append(pending, reportId)).commit();
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    private static void chooseCarLifeRetry(final MainActivity activity, final List<String> pending) {
+        new AlertDialog.Builder(activity).setTitle("选择要补传附件的报告")
+            .setItems(pending.toArray(new String[0]), new DialogInterface.OnClickListener() {
+                public void onClick(DialogInterface dialog, int which) {
+                    retryCarLife(activity, pending.get(which));
+                }
+            }).setNegativeButton("取消", null).show();
+    }
+
+    private static void retryCarLife(final MainActivity activity, final String reportId) {
+        if (!beginReportJob(activity, "正在补传 CarLife 附件…")) return;
+        try { activity.worker.execute(new Runnable() { public void run() {
+            try {
+                showReportResult(activity, "CarLife 附件", "报告编号：" + reportId +
+                    "\n诊断报告此前已收到。" + uploadCarLife(activity, reportId, true));
+            } finally { REPORT_RUNNING.set(false); }
+        }}); } catch (RuntimeException e) {
+            REPORT_RUNNING.set(false);
+            finishError(activity, "补传附件未启动，诊断报告此前已收到", e);
+        }
+    }
+
+    private static String uploadCarLife(final MainActivity activity, final String reportId, boolean saved) {
+        String retry = saved ? "\n可在「问题反馈 → 补传 CarLife 附件」继续提交。" :
+            "\n车机暂未保存附件补传记录。仍可在下次提交问题时附带安装包。";
+        try {
+            JSONObject result = CarLifeArtifactUpload.collect(activity, reportId, new CarLifeArtifactUpload.Progress() {
+                public void onArtifact(String kind, final int index, final int total) {
+                    activity.runOnUiThread(new Runnable() { public void run() {
+                        if (!activity.closed) activity.showOperation("日志已收到，正在传送 CarLife 附件（" + index + "/" + total + "）…");
+                    }});
+                }
+            });
+            StringBuilder message = new StringBuilder();
+            JSONArray files = result.getJSONArray("artifacts");
+            for (int i = 0; i < files.length(); i++) {
+                JSONObject file = files.getJSONObject(i);
+                String status = file.optString("status");
+                boolean apk = "carlife-apk".equals(file.optString("kind"));
+                message.append("\nCarLife ").append(apk ? "APK" : "ODEX");
+                if ("uploaded".equals(status) || "reused".equals(status)) message.append(" 已确认收到。");
+                else if (!apk && ("missing".equals(status) || "optional_unreadable".equals(status))) {
+                    message.append(" 不可读取或未安装，已跳过。");
+                } else message.append(" 暂未收到。");
+            }
+            if (!"complete".equals(result.optString("status"))) return message.append(retry).toString();
+            if (saved) {
+                SharedPreferences prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+                String remaining = PendingAttachmentReports.complete(prefs.getString(PENDING_CARLIFE, ""), reportId);
+                if (!prefs.edit().putString(PENDING_CARLIFE, remaining).commit()) {
+                    message.append("\n车机暂未写入附件完成状态，可补传核对。");
+                }
+            }
+            return message.toString();
+        } catch (Exception failure) {
+            return "\nCarLife 附件暂未确认收到。" + retry;
+        }
+    }
+
+    private static void showReportResult(final MainActivity activity, final String title, final String message) {
+        activity.runOnUiThread(new Runnable() { public void run() {
+            activity.busy = false;
+            if (!activity.closed && !activity.isFinishing()) {
+                new AlertDialog.Builder(activity).setTitle(title).setMessage(message).setPositiveButton("确定", null).show();
+            }
         }});
     }
 
@@ -505,6 +632,14 @@ final class CompatibilityTools {
             bounded.add(item); boundedIds.add(item.id); remainingBytes -= size;
             if (wheel) wheelBytes -= size; else audioBytes -= size;
         }
+        int pairingEvents = 12;
+        for (int i = selected.size() - 1; i >= 0 && pairingEvents > 0; i--) {
+            EventCandidate item = selected.get(i);
+            if (!"LOCKDOWN_PAIRING".equals(item.event.optString("type"))) continue;
+            int size = item.event.toString().getBytes("UTF-8").length + 8;
+            if (size > remainingBytes) continue;
+            bounded.add(item); boundedIds.add(item.id); remainingBytes -= size; pairingEvents--;
+        }
         // Reserve the small number of stack lifecycle anchors, then a bounded recent counter window.
         for (EventCandidate item : selected) if (item.networkMilestone) {
             int size = item.event.toString().getBytes("UTF-8").length + 8;
@@ -591,6 +726,7 @@ final class CompatibilityTools {
             "WHEEL_KEY".equals(type) || "WHEEL_CONTROL".equals(type) || "USB_DEVICE".equals(type) ||
             "APP_STARTUP".equals(type) || "USB_DEFAULT_HANDLER".equals(type) ||
             "USB_PERMISSION_REQUEST".equals(type) || "USB_PERMISSION_RESULT".equals(type) || "USB_PERMISSION_WAIT".equals(type) ||
+            "LOCKDOWN_PAIRING".equals(type) ||
             "USBMUX_WRITE_TIMING".equals(type) || "NCM_WRITE_TIMING".equals(type) ||
             "START_SESSION_QUEUE".equals(type) || "CONNECTION_PREWARM".equals(type) ||
             "USB_PRESENCE".equals(type) || "FAILED".equals(type) || "DISCONNECTED".equals(type) ||
@@ -733,6 +869,15 @@ final class CompatibilityTools {
         String pcm = between(text, " pcmCapture=", " candidates=");
         if (cards != null) out.put("alsaCardsSummary", sanitizeSummary(cards, 512));
         if (pcm != null) out.put("alsaPcmSummary", sanitizeSummary(pcm, 768));
+        String highPass = tokens.optString("dsp");
+        if ("duplex".equals(event) && highPass.matches("hpfHz=[0-9]{1,3}")) {
+            StringBuilder dsp = new StringBuilder(highPass);
+            for (String key : new String[] {"noiseFloorRms", "gateGain", "filteredRms", "outputRms"}) {
+                String value = tokens.optString(key);
+                if (value.matches("[0-9]{1,5}")) dsp.append(' ').append(key).append('=').append(value);
+            }
+            out.put("diagnosticSummary", dsp.toString());
+        }
         return out;
     }
 
@@ -768,7 +913,8 @@ final class CompatibilityTools {
 
     private static void putNumber(JSONObject out, JSONObject tokens, String source, String target) throws Exception {
         if (!tokens.has(source) || out.has(target)) return;
-        try { long value = Long.parseLong(tokens.optString(source)); if (value >= 0 && value <= 1000000000L) out.put(target, value); }
+        try { long value = Long.parseLong(tokens.optString(source)); long minimum = "errno".equals(source) ? -4095L : 0L;
+            if (value >= minimum && value <= 1000000000L) out.put(target, value); }
         catch (NumberFormatException ignored) { }
     }
 

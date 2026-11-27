@@ -1,8 +1,11 @@
 package com.shilapi.xcertplay.transport
 
 import java.io.Closeable
+import java.io.IOException
 import java.security.GeneralSecurityException
 import java.util.concurrent.atomic.AtomicBoolean
+
+internal class LockdownPairingRejected(code: String) : IOException("Lockdown StartSession failed: $code")
 
 /**
  * Blocking minimum Lockdown path that opens the `com.apple.carkit.service` byte stream.
@@ -134,6 +137,9 @@ class LockdownCarKitClient(
             is LockdownPlistValue.Integer -> (response.entries["ErrorString"] as? LockdownPlistValue.Text)?.value
                 ?: error.value.toString()
             else -> throw IphoneUsbException.Protocol("$request response Error was not text or integer")
+        }
+        if (request == "StartSession" && (code == "InvalidPairRecord" || code == "InvalidHostID" || code == "MissingPairRecord")) {
+            throw LockdownPairingRejected(code)
         }
         throw IphoneUsbException.Protocol("Lockdown $request failed: $code")
     }
