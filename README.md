@@ -20,6 +20,13 @@
 | **有线 CarPlay 0.44.52** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.52/DiPlay_API17_0.44.52.apk) | USB 数据线连接 iPhone，支持最高 60 FPS 配置与双指触控转发。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.52) |
 | **无线 CarPlay 0.1.117** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.117/DiPlay_API17_0.1.117-auto-evidence.apk) | 实车使用绿联 CM591（`10D7:B012`），iPhone 自动加入车机的 Wi-Fi Direct 局域网。默认 20 FPS，可调至 60 FPS。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.117) |
 
+### 多手机切换测试版
+
+- **有线 0.44.60** 改进快速拔插切换，按本次 USB 授权请求和当前设备确认连接，避免旧手机的授权或画面回调影响下一台。[下载与更新说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.60-phone-switch-test)
+- **无线 0.1.125** 优先连接上次成功投屏的 iPhone，确认失败后继续尝试其他已配对手机。换手机时核对投屏身份，并妥善处理旧会话结束和超时事件。[下载与更新说明](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.125-phone-selection-test)
+
+两份测试版均通过 API 17 APK 签名校验和本地回归测试，分别通过 523 项和 348 项。多手机切换仍待实车验证。
+
 **反馈只填问题。** 两版都会自动把可读取的原厂车型代码、固件版本、ALSA 声卡与采集路径、通话诊断和方向盘事件放进同一份报告。停车复现问题后，在车机里写一句现象并提交即可。 [反馈与隐私](docs/COMPATIBILITY_TESTING.md)
 
 ## 适配交流
