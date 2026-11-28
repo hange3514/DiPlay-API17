@@ -60,11 +60,16 @@ public final class BydCallUsbAssert implements Closeable, ServiceConnection {
     private volatile IBinder multimedia, serial;
     private boolean multimediaBound, serialBound;
     private volatile boolean callActive;
+    private long callGeneration;
     private long callStartElapsed;
     private long lastAssertElapsed;
+    private boolean lastAssertWasReactive;
     private int reassertCount;
-    private int timedAssertIndex;
-    private boolean usbLaneConfirmed;
+    private int lastMcuSource;
+    private long lastMcuSourceElapsed;
+    private boolean sequenceCompleted;
+    private boolean assertionPending;
+    private boolean delayedReassertPending;
 
     public BydCallUsbAssert(Context c) {
         context = c.getApplicationContext();
@@ -98,83 +103,152 @@ public final class BydCallUsbAssert implements Closeable, ServiceConnection {
     public synchronized void callStarted() {
         if (closed.get() || callActive) return;
         callActive = true;
+        final long generation = ++callGeneration;
         callStartElapsed = SystemClock.elapsedRealtime();
-        lastAssertElapsed = 0;
+        lastAssertElapsed = -1;
+        lastAssertWasReactive = false;
         reassertCount = 0;
-        timedAssertIndex = 0;
-        usbLaneConfirmed = false;
+        lastMcuSource = -1;
+        lastMcuSourceElapsed = -1;
+        sequenceCompleted = false;
+        assertionPending = false;
+        delayedReassertPending = false;
         OemAudioObserver.beginWholeCallCapture();
         OemAudioObserver.setMcuSourceListener(new OemAudioObserver.McuSourceListener() {
-            @Override public void onMcuSource(int source, long elapsedMs) { onMcuSourceState(source, elapsedMs); }
+            @Override public void onMcuSource(int source, long elapsedMs) {
+                onMcuSourceState(generation, source, elapsedMs);
+            }
         });
         log("call_active; timed_usb_asserts=" + TIMED_ASSERT_MS.length);
-        scheduleNextTimedAssert();
+        for (int index = 0; index < TIMED_ASSERT_MS.length; index++) {
+            final String phase = "timed_" + index;
+            main.postDelayed(new Runnable() { public void run() {
+                assertUsbLane(generation, phase, false);
+            }}, TIMED_ASSERT_MS[index]);
+        }
     }
 
     public synchronized void callEnded() {
         if (!callActive) return;
         callActive = false;
+        callGeneration++;
         OemAudioObserver.setMcuSourceListener(null);
         OemAudioObserver.beginCallRouteExitCapture();
-        log("call_ended; usb_lane_confirmed=" + usbLaneConfirmed + " reasserts=" + reassertCount);
+        log("call_ended; usb_lane_confirmed=" + (lastMcuSource == SOURCE_USB) + " reasserts=" + reassertCount);
     }
 
-    private void scheduleNextTimedAssert() {
-        final int index;
-        synchronized (this) {
-            if (!callActive || closed.get() || timedAssertIndex >= TIMED_ASSERT_MS.length) return;
-            index = timedAssertIndex++;
-        }
-        long delay = TIMED_ASSERT_MS[index] - (SystemClock.elapsedRealtime() - callStartElapsed);
-        main.postDelayed(new Runnable() { public void run() {
-            synchronized (BydCallUsbAssert.this) { if (!callActive || closed.get()) return; }
-            assertUsbLane("timed_" + index);
-            scheduleNextTimedAssert();
-        }}, Math.max(delay, 0));
+    private synchronized boolean isCurrentCall(long generation) {
+        return callActive && !closed.get() && generation == callGeneration;
     }
 
-    private void onMcuSourceState(int source, long elapsedMs) {
-        boolean fire;
+    private void onMcuSourceState(long generation, int source, long elapsedMs) {
+        final boolean changed;
         synchronized (this) {
-            if (source == SOURCE_USB) usbLaneConfirmed = true;
-            fire = shouldReassert(callActive, source, elapsedMs, lastAssertElapsed, reassertCount);
-            if (fire) { lastAssertElapsed = elapsedMs; reassertCount++; }
+            if (!isCurrentCall(generation) || source < 0 || elapsedMs < callStartElapsed
+                    || elapsedMs < lastMcuSourceElapsed) return;
+            changed = lastMcuSource != source;
+            lastMcuSource = source;
+            lastMcuSourceElapsed = elapsedMs;
         }
-        log("mcu_source_state_during_call source=" + source + " usbConfirmed=" + usbLaneConfirmed + " reassert=" + fire);
-        if (fire) assertUsbLane("reactive_source_" + source);
+        if (changed) log("mcu_source_state_during_call source=" + source);
+        if (source != SOURCE_USB) assertUsbLane(generation, "reactive_source_" + source, true);
     }
 
     /** Pure decision, unit-tested: re-assert only while the MCU reads back off the USB lane. */
     static boolean shouldReassert(boolean active, int decodedSource, long now, long lastAssertAt, int reasserts) {
-        return active && decodedSource >= 0 && decodedSource != SOURCE_USB
-                && now - lastAssertAt >= REASSERT_MIN_INTERVAL_MS && reasserts < MAX_REASSERT_PER_CALL;
+        return active && needsReactiveAssertion(decodedSource, reasserts) && reassertDelayMs(now, lastAssertAt) == 0;
     }
 
-    private void assertUsbLane(final String phase) {
+    private static boolean needsReactiveAssertion(int source, int reasserts) {
+        return source >= 0 && source != SOURCE_USB && reasserts < MAX_REASSERT_PER_CALL;
+    }
+
+    static long reassertDelayMs(long now, long lastAssertAt) {
+        return lastAssertAt < 0 ? 0 : Math.max(0, REASSERT_MIN_INTERVAL_MS - (now - lastAssertAt));
+    }
+
+    static boolean canSkipTimedAssertion(int source, boolean completed) {
+        // A source readback does not report the volume or mute state. Keep one full sequence.
+        return completed && source == SOURCE_USB;
+    }
+
+    private void assertUsbLane(final long generation, final String phase, final boolean reactive) {
         final IBinder mm = multimedia, ss = serial;
-        if (mm == null || ss == null) { log("usb_assert_skipped_service_unavailable " + phase); return; }
+        synchronized (this) {
+            if (!isCurrentCall(generation) || assertionPending) return;
+            if (canSkipTimedAssertion(lastMcuSource, sequenceCompleted)) {
+                if (!reactive) log("usb_assert_skipped_already_usb phase=" + phase);
+                return;
+            }
+            if (reactive && !needsReactiveAssertion(lastMcuSource, reassertCount)) return;
+            long delay = reassertDelayMs(SystemClock.elapsedRealtime(), lastAssertElapsed);
+            if (delay > 0 && (reactive || lastAssertWasReactive)) {
+                if (reactive && !delayedReassertPending) {
+                    delayedReassertPending = true;
+                    main.postDelayed(new Runnable() { public void run() {
+                        synchronized (BydCallUsbAssert.this) {
+                            if (!isCurrentCall(generation)) return;
+                            delayedReassertPending = false;
+                        }
+                        assertUsbLane(generation, "deferred_source_reassert", true);
+                    }}, delay);
+                }
+                return;
+            }
+            if (mm == null || ss == null) { log("usb_assert_skipped_service_unavailable " + phase); return; }
+            assertionPending = true;
+        }
         try {
             COMMANDS.execute(new Runnable() { public void run() {
-                synchronized (BydCallUsbAssert.this) { if (!callActive || closed.get()) return; }
+                boolean started = false;
                 try {
+                    synchronized (BydCallUsbAssert.this) {
+                        if (!isCurrentCall(generation) || canSkipTimedAssertion(lastMcuSource, sequenceCompleted)) return;
+                        long now = SystemClock.elapsedRealtime();
+                        if (reactive && !shouldReassert(true, lastMcuSource, now, lastAssertElapsed, reassertCount)) return;
+                        lastAssertElapsed = now;
+                        lastAssertWasReactive = reactive;
+                        if (reactive) reassertCount++;
+                        started = true;
+                    }
                     serialSend(ss, frame(sourceMessage(SOURCE_USB)));
                     log("usb_source_request_returned source=10 phase=" + phase);
-                    synchronized (BydCallUsbAssert.this) { if (!callActive || closed.get()) return; }
+                    if (!isCurrentCall(generation)) return;
                     byte[] volumes = readDatabaseBytes(mm, OEM_VOLUME_KEYS);
                     if (volumes.length < 4) throw new IOException("OEM volume database returned too few values");
                     int mediaVolume = volumes[3] & 0xff;
+                    if (!isCurrentCall(generation)) return;
                     serialSend(ss, frame(modeVolumeMessage(mediaVolume)));
                     log("usb_mode_volume_request_returned volume4Mx9=" + mediaVolume + " phase=" + phase);
-                    synchronized (BydCallUsbAssert.this) { if (!callActive || closed.get()) return; }
+                    if (!isCurrentCall(generation)) return;
                     // Official MuteControl(4) emits MCU message {4,4,1,1} and clears
                     // the OEM all-mute state; no source or UI switch.
                     control(mm, (byte) 3, (byte) 4, null);
                     log("usb_unmute_request_returned phase=" + phase);
+                    synchronized (BydCallUsbAssert.this) {
+                        if (isCurrentCall(generation)) sequenceCompleted = true;
+                    }
                 } catch (Exception e) {
                     log("usb_assert_failed=" + e.getClass().getSimpleName() + " phase=" + phase);
+                } finally {
+                    finishAssertion(generation, started);
                 }
             }});
-        } catch (RejectedExecutionException e) { log("usb_assert_queue_busy " + phase); }
+        } catch (RejectedExecutionException e) {
+            finishAssertion(generation, false);
+            log("usb_assert_queue_busy " + phase);
+        }
+    }
+
+    private void finishAssertion(long generation, boolean checkReadback) {
+        final boolean stillOffUsb;
+        synchronized (this) {
+            if (!isCurrentCall(generation)) return;
+            assertionPending = false;
+            stillOffUsb = checkReadback && lastMcuSourceElapsed > lastAssertElapsed
+                    && needsReactiveAssertion(lastMcuSource, reassertCount);
+        }
+        if (stillOffUsb) assertUsbLane(generation, "source_readback_during_recovery", true);
     }
 
     static byte[] sourceMessage(byte source) { return new byte[] { 1, 2, source, 0, 0, 0 }; }
@@ -270,7 +344,7 @@ public final class BydCallUsbAssert implements Closeable, ServiceConnection {
 
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        synchronized (this) { callActive = false; }
+        synchronized (this) { callActive = false; callGeneration++; }
         OemAudioObserver.setMcuSourceListener(null);
         main.post(new Runnable() { public void run() {
             multimedia = null;

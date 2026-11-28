@@ -7,6 +7,7 @@ import java.io.Closeable
 import java.io.IOException
 import java.net.*
 import java.nio.ByteBuffer
+import java.util.Locale
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -453,7 +454,10 @@ class LegacyMedia @JvmOverloads constructor(surface:Surface?,private val width:I
  inner class AudioOutput(id:AudioStreamId,private val f:com.shilapi.xcertplay.airplay.AudioFormat,private val ownsCallMode:Boolean):Closeable {
   val role=LegacyAudioPolicy.role(id.type,f.audioType);private var stream=routing?.stream(role)?:AudioManager.STREAM_MUSIC
   private var playing=false;private val navigationActivity=NavigationActivity()
-  private val stop=AtomicBoolean(false);private val queue=AudioInput();@Volatile private var track:AudioTrack?=null
+  private val callPlayout=if(role=="call"||f.audioType.equals("alert",ignoreCase=true))CallPlayoutBuffer(f.sampleRate)else null
+  private val stop=AtomicBoolean(false)
+  private val queue=if(callPlayout!=null)AudioInput(capacity=96,maxQueuedBytes=64*1024)else AudioInput()
+  @Volatile private var track:AudioTrack?=null
   // Keep call PCM in its negotiated format. The on-device 12-profile replay
   // found clear speech for STREAM_MUSIC / MODE_NORMAL / swapped PCM at 32 kHz
   // mono. The prior software 32->48 kHz + mono->stereo conversion was not
@@ -468,7 +472,25 @@ class LegacyMedia @JvmOverloads constructor(surface:Surface?,private val width:I
   private val pcmEvidence=PcmEvidence();@Volatile private var lastHead=0L
   @Volatile private var appliedVolume=Float.NaN;private var bytesWritten=0L;private var mutedPackets=0L;private var lastProgress=0L;private var checkpoints=0
   private val thread=MediaWorkers.start("api17-audio"){loop()}
-  fun offer(b:ByteArray,t:Int){if(!stop.get())queue.offer(b,t)}
+  fun offer(b:ByteArray,t:Int){
+   if(stop.get())return
+   if(callPlayout==null){queue.offer(b,t);return}
+   val payloadBytes=b.size-MicrophonePacketizer.RTP_HEADER_LEN
+   val frames=when(f.codec){
+    AudioCodecKind.LPCM->if(f.channels in 1..2&&payloadBytes%(2*f.channels)==0)payloadBytes/(2*f.channels)else 0
+    AudioCodecKind.AAC_LC->if(payloadBytes>0)1024 else 0
+    AudioCodecKind.OPUS->0
+   }
+   if(frames<=0){queue.drop();return}
+   // AudioStream delivers a fresh decrypted RTP buffer and never mutates it after delivery.
+   queue.offerOwned(b,t,frames)
+  }
+  private fun trackQueuedFrames():Long {
+   val current=track?:return -1L
+   val head=runCatching{current.playbackHeadPosition.toLong() and 0xffffffffL}.getOrNull()?:return -1L
+   val queued=(bytesWritten/(2*outputChannels)-head) and 0xffffffffL
+   return if(queued<=outputRate*2L)queued else -1L
+  }
   @Synchronized fun volume(value:Float){val t=track?:return;if(appliedVolume==value)return;runCatching{if(t.setStereoVolume(value,value)==AudioTrack.SUCCESS)appliedVolume=value}}
   private fun stopIdleNavigation(){if(playing&&role=="navigation"&&!navigationActivity.active(System.nanoTime())){track?.stop();playing=false;log("navigation_idle_stopped")}}
   private fun openTrack():AudioTrack {
@@ -589,7 +611,25 @@ class LegacyMedia @JvmOverloads constructor(surface:Surface?,private val width:I
     log("audio_started role=$role stream=$stream codec=${f.codec} inputRate=${f.sampleRate} inputChannels=${f.channels} outputChannels=$outputChannels outputRate=$outputRate actualStream=${t.streamType} nativeRate=$nativeRate");var packets=0;var pending:AudioInput.Packet?=null
     while(!stop.get()){
      drain()
-     if(pending==null)pending=queue.poll(if(inFlight==0)100 else 5)
+     if(pending==null){
+      pending=queue.poll(if(inFlight==0)100 else 5)
+      val packet=pending
+      val timing=callPlayout
+      if(packet!=null&&timing!=null&&!queue.expired(packet)){
+       val arrival=timing.packetArrived(packet.arrivedNs,packet.audioFrames)
+       val runway=if(arrival==CallPlayoutBuffer.Arrival.CHECK_TRACK&&bytesWritten>0&&inFlight==0){
+        if(!playing&&role=="navigation")0L else if(playing&&appliedVolume>0f)trackQueuedFrames()else -1L
+       }else -1L
+       if(timing.shouldPrefill(arrival,runway)){
+        val started=System.nanoTime()
+        val frames=queue.awaitPrefill(packet,timing.targetFrames,timing.maxWaitMs)
+        if(stop.get())break
+        log("audio_call_prefill role=$role kind=${f.audioType} codec=${f.codec} stage=${arrival.name.lowercase(Locale.US)} "+
+         "targetMs=${timing.targetFrames*1000/f.sampleRate} bufferedMs=${frames*1000L/f.sampleRate} "+
+         "waitedMs=${(System.nanoTime()-started)/1_000_000} trackQueuedFrames=$runway")
+       }
+      }
+     }
      val p=pending
      if(p==null){stopIdleNavigation();continue}
      if(queue.expired(p)){queue.drop();pending=null;continue}

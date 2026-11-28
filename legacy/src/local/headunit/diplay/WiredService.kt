@@ -208,6 +208,7 @@ class WiredService:Service() {
  private var started=false
  @Volatile private var connectionId=""
  private val bornAt=SystemClock.elapsedRealtime()
+ private val callAudioPhase=CallAudioPhase()
  private val startup=ConnectionTimings(bornAt)
  private var requestStartedAt=bornAt
  @Volatile private var selectedFps=PlaybackOptions.DEFAULT_FPS
@@ -319,7 +320,8 @@ class WiredService:Service() {
    (stage=="AIRPLAY"&&text.startsWith("Receive: video eventType=video_rx_window "))
   val detail=if(videoWindow)"$text requestedFps=$selectedFps" else text
   if(metric!=null&&(latestPerformance.containsKey(metric)||latestPerformance.size<12))latestPerformance[metric]="ageMs=${SystemClock.elapsedRealtime()-bornAt} "+detail.take(1200)
-  try{MainActivity.record(this,stage,JSONObject().put("detail",detail.take(1200)).put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}}
+  val eventType=if(stage=="MEDIA"&&text.startsWith("audio_call_prefill "))"CALL_PLAYOUT_BUFFER" else stage
+  try{MainActivity.record(this,eventType,JSONObject().put("detail",detail.take(1200)).put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}}
  fun note(stage:String,text:String){if(stage=="FAILED")lastFailure=text;log(stage,text);sendBroadcast(Intent("local.headunit.diplay.STATUS").setPackage(packageName).putExtra("message",text).putExtra("stage",stage).putExtra("connection_id",connectionId))}
  private fun onFirstVideoFrame() {
   synchronized(resourceLock){
@@ -807,7 +809,12 @@ class WiredService:Service() {
    onHold={log("START_SESSION_RECOVERY","startup timeout extended to ${WiredStartWatchdog.HELD_TIMEOUT_MILLIS}ms while one justified StartSession retry remains possible")},
   )
   wiredStartWatchdog=startWatchdog
-  val controlResult=Iap2WiredControlClient(csm,Iap2MfiAuthenticationClient(auth)).run(ident,endpoint,availableCurrentMilliAmps=500,timeoutMillis=Iap2WiredControlClient.NO_TIMEOUT_MILLIS,onProgress={
+  val controlResult=Iap2WiredControlClient(csm,Iap2MfiAuthenticationClient(auth)).run(ident,endpoint,availableCurrentMilliAmps=500,timeoutMillis=Iap2WiredControlClient.NO_TIMEOUT_MILLIS,onIncoming={frame->
+   if(!closed)callAudioPhase.accept(frame){stage->
+    try{MainActivity.record(this,"CALL_STATE_PHASE",JSONObject().put("stage",stage.label).put("origin","usb")
+     .put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
+   }
+  },onProgress={
    log("CONTROL",it)
    if(it.startsWith("iap2 4300 "))log("START_SESSION_QUEUE","phase=availability ${it.removePrefix("iap2 4300 ")}")
    if(it.startsWith("iap2 tx=0x4301 transport flushed ")||it.startsWith("iap2 tx=0x4301 transport flush failed "))log("START_SESSION_QUEUE",it)

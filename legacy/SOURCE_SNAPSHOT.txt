@@ -1,4 +1,5 @@
-DiPlay 0.44.60-phone-switch-test (versionCode 195), a preview release based on 0.44.57.
+DiPlay 0.44.61-call-ringback-test (versionCode 196), based on 0.44.60-phone-switch-test.
+Add a bounded short prefill for call and alert playback, and avoid redundant MX9A0 audio source writes.
 Wired connection startup follows the attached iPhone after the previous USB session releases.
 Phone replacement and expected USB mode changes have separate startup handling, with per-phone trust records preserved.
 USB authorization observes the current device list and grant when a callback is delayed or missed.
@@ -7,6 +8,6 @@ If another Apple device is attached during USB mode change, the selected enumera
 First-frame status requires the current connection to be live.
 Default call downlink uses Android media output. The microphone tries ALSA first.
 Based on shihabal3amri/DiPlay under GPL-3.0; includes application and native lwIP sources.
-The public source snapshot excludes generated build outputs, APK signing keys, server credentials, and offline MFi identity files.
+This local snapshot and its APK are for testing only.
 The APK retains the upstream-derived offline attachment identity documented in docs/AUTH_PROVENANCE.md.
 The 60 FPS and two-finger features were confirmed in wireless 0.1.109 on a 2018 BYD Song DM with an MX9A0 head unit and iPhone 15 Pro Max (iOS 26.2.1). This wired build is pending a separate in-vehicle check.
