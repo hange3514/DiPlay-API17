@@ -20,6 +20,10 @@
 | **有线 CarPlay 0.44.52** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.52/DiPlay_API17_0.44.52.apk) | USB 数据线连接 iPhone，支持最高 60 FPS 配置与双指触控转发。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.52) |
 | **无线 CarPlay 0.1.117** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.117/DiPlay_API17_0.1.117-auto-evidence.apk) | 实车使用绿联 CM591（`10D7:B012`），iPhone 自动加入车机的 Wi-Fi Direct 局域网。默认 20 FPS，可调至 60 FPS。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.117) |
 
+### 无线 Wi-Fi Direct 兼容性测试版
+
+**无线 0.1.127** 按车机系统实际提供的 Wi-Fi Direct 功能和服务自动选路，并读取群组接口的实际地址。移除了此前使 MX9 选用普通热点的型号限制。新车型的群组创建及 iPhone 接管效果待实车确认。[下载 APK 与测试说明](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.127-wifi-direct-compat)
+
 ### 外拨回铃音测试版
 
 - **有线 0.44.61** 增加约 48 毫秒的通话和提示音预缓冲，减少回铃开头断续和重复切换车机音源。[下载 APK 与更新说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.61-call-ringback-test)
