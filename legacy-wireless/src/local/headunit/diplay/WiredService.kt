@@ -63,6 +63,9 @@ class WiredService:Service() {
   @JvmStatic @Synchronized fun attachSurface(owner:Any,value:Surface){if(surfaceOwner===owner&&surface===value){live?.signalProjectionSurface();return};val previousGeneration=touchSurfaceGeneration++;if(surface!=null)live?.cancelTouchOnDetach(previousGeneration);surfaceOwner=owner;surface=value;live?.signalProjectionSurface();live?.sink?.setSurface(value);live?.sink?.routing?.foreground();live?.log("VIDEO_SURFACE","attached")}
   @JvmStatic @Synchronized fun detachSurface(owner:Any){if(surfaceOwner!==owner)return;surfaceOwner=null;surface=null;val previousGeneration=touchSurfaceGeneration++;live?.cancelTouchOnDetach(previousGeneration);live?.sink?.setSurface(null);live?.log("VIDEO_SURFACE","detached; USB session retained")}
   @JvmStatic fun currentConnectionId():String=live?.let{if(!it.closed&&!it.failed.get())it.connectionId else ""}.orEmpty()
+  @JvmStatic fun usesSoftApForConnection(id:String):Boolean=live?.let{
+   id.isNotEmpty()&&it.connectionId==id&&!it.closed&&!it.failed.get()&&!it.useP2p
+  }==true
   @JvmStatic fun currentProbeUrl():String?=activeProbeUrl
   @JvmStatic fun currentProgressStage():String=live?.progressStage?:"CONNECT_START"
   @JvmStatic fun currentProgressMessage():String=live?.progressMessage.orEmpty()
@@ -1120,7 +1123,7 @@ class WiredService:Service() {
  }
  override fun onStartCommand(i:Intent?,flags:Int,id:Int):Int {
   if(started)return START_NOT_STICKY
-  useP2p=LegacyCarHotspot.usesWifiDirect(this)
+  useP2p=i?.getBooleanExtra(MainActivity.EXTRA_FORCE_SOFTAP,false)!=true&&LegacyCarHotspot.usesWifiDirect(this)
   activeProbeUrl=null;wifiIpReady=false;usbBatchId="";usbProfile=UsbStartupProfile.DEFAULT;requestStartedAt=(i?.getLongExtra("request_started_at",bornAt)?:bornAt).takeIf{it in 1..bornAt}?:bornAt;vpnWaitMs=0;connectionId=i?.getStringExtra("connection_id").orEmpty();usbBtDevice=i?.getParcelableExtra<UsbDevice>("usb_bt_device")
   if(cleanupCount.get()>0||connectingWorkers.get()>0||MediaWorkers.busy()){fail(IOException("Previous connection is still releasing; retry shortly"),"previous_connection_cleanup");return START_NOT_STICKY}
   started=true;registerDetachReceiver()
@@ -1327,6 +1330,60 @@ class WiredService:Service() {
    if(carplayDiscovery)"120 秒内未接到 iPhone 的 iAP2 连接，请在「设置 → 通用 → CarPlay 车载」中选择车机。"
    else "No iAP2 RFCOMM connection arrived within 120 seconds; check iPhone Bluetooth pairing and keep the Bluetooth settings page open")
  }
+ private fun prepareWirelessNetwork():HybridNetworkSnapshot{
+  if(!useP2p)return prepareSoftAp()
+  note("WIFI_WAIT","正在创建 Wi-Fi Direct 局域网。")
+  val p2p=WifiP2pHotspot(this)
+  own(p2p,"wifi_direct_group");p2pHotspot=p2p
+  return try{
+   p2p.start({closed}){stage->
+    recordRuntimeLink(stage,"backend=${networkBackend()} vehicleMobileDataSetting=${LegacyCarHotspot.mobileDataSetting(this)?:-1}")
+    if(stage=="p2p_wait_wifi")note("WIFI_WAIT","正在开启车机 Wi-Fi，以创建 Wi-Fi Direct 局域网。")
+    if(stage=="p2p_create_group")note("WIFI_WAIT","正在创建 Wi-Fi Direct 局域网。")
+   }
+  }catch(unavailable:WifiP2pHotspot.StartException){
+   recordRuntimeLink("p2p_start_failed","reason=${unavailable.reason}")
+   if(unavailable.safeToUseSoftAp&&!LegacyCarHotspot.isSupported(this)){
+    check()
+    p2pHotspot=null;useP2p=false
+    registerHotspotRecoveryReceiver()
+    recordRuntimeLink("p2p_fallback_softap","reason=${unavailable.reason} backend=${networkBackend()}")
+    note("WIFI_DIRECT_FALLBACK","Wi-Fi Direct 未能就绪，正在尝试车载热点。")
+    prepareSoftAp()
+   }else{
+    val prefix=if(unavailable.reason=="system_hotspot_active")"P2P_SYSTEM_HOTSPOT_ACTIVE" else "P2P_CONNECTION_FAILED"
+    throw IOException("$prefix ${unavailable.message}",unavailable)
+   }
+  }
+ }
+ private fun prepareSoftAp():HybridNetworkSnapshot{
+  note("WIFI_WAIT","正在并行准备车载热点和 USB 蓝牙。")
+  if(LegacyCarHotspot.isMobileDataIsolationEnabled(this)){
+   try{
+    VehicleMobileData.disableBeforeHotspot(this,{closed}){
+     recordRuntimeLink("mobile_data_disconnecting","before_hotspot=true")
+     note("WIFI_WAIT","正在等待车机移动网络断开。")
+    }
+    recordRuntimeLink("mobile_data_disconnected","before_hotspot=true")
+   }catch(failure:LegacyCarHotspotException){
+    recordRuntimeLink("mobile_data_disconnect_failed","reason=${failure.reason}")
+    throw IOException("WIFI_CHECK_SETTINGS ${failure.message}",failure)
+   }
+  }
+  if(!LegacyCarHotspot.isAutoStartEnabled(this))return awaitVehicleHotspot(30000L)
+  try{
+   return LegacyCarHotspot.prepare(this,30000L,{closed}){stage->
+    val apEnabled=HybridNetwork.isApEnabled(this)
+    log("HYBRID_WIFI","stage=$stage wifiConnected=$apEnabled")
+    try{MainActivity.record(this,"HYBRID_WIFI",JSONObject().put("stage",stage).put("wifiConnected",apEnabled).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
+    if(stage=="ap_enable_requested")note("WIFI_WAIT","正在开启车载热点。")
+   }
+  }catch(unavailable:LegacyCarHotspotException){
+   try{MainActivity.record(this,"HYBRID_WIFI",JSONObject().put("stage","ap_auto_failed").put("reason",unavailable.reason).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
+   val prefix=if(LegacyCarHotspot.shouldOpenSystemSettings(unavailable.reason))"WIFI_OPEN_FALLBACK" else "WIFI_CHECK_SETTINGS"
+   throw IOException("$prefix ${unavailable.message}",unavailable)
+  }
+ }
  private fun connect(reselectPhone:Boolean){
   val hybridPrefs=getSharedPreferences("hybrid_settings",MODE_PRIVATE)
   val hybridProfile=0
@@ -1365,48 +1422,7 @@ class WiredService:Service() {
   log("USB_BT_STACK","stage=start vid=${currentBt.vendorId} pid=${currentBt.productId} chipset=$chipsetHint interfaceCount=${currentBt.interfaceCount} rtl8761buFirmwareCandidate=$rtlFirmwareCandidate ats2851GeneralBondingQuirk=$ats2851")
   try{MainActivity.record(this,"USB_BT_STACK",JSONObject().put("stage","start").put("vid",currentBt.vendorId).put("pid",currentBt.productId).put("chipsetHint",chipsetHint).put("interfaceCount",currentBt.interfaceCount).put("firmwareSetupExpected",rtlFirmwareCandidate).put("ats2851GeneralBondingQuirkEnabled",ats2851).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Throwable){}
   phase("wifi_wait")
-  note("WIFI_WAIT",if(useP2p)"正在创建 Wi-Fi Direct 局域网。" else "正在并行准备车载热点和 USB 蓝牙。")
-  if(!useP2p&&LegacyCarHotspot.isMobileDataIsolationEnabled(this)){
-   try{
-    VehicleMobileData.disableBeforeHotspot(this,{closed}){
-     recordRuntimeLink("mobile_data_disconnecting","before_hotspot=true")
-     note("WIFI_WAIT","正在等待车机移动网络断开。")
-    }
-    recordRuntimeLink("mobile_data_disconnected","before_hotspot=true")
-   }catch(failure:LegacyCarHotspotException){
-    recordRuntimeLink("mobile_data_disconnect_failed","reason=${failure.reason}")
-    throw IOException("WIFI_CHECK_SETTINGS ${failure.message}",failure)
-   }
-  }
-  val hotspot=if(useP2p){
-   val p2p=WifiP2pHotspot(this)
-   own(p2p,"wifi_direct_group");p2pHotspot=p2p
-   try{
-    p2p.start({closed}){stage->
-     recordRuntimeLink(stage,"backend=${networkBackend()} vehicleMobileDataSetting=${LegacyCarHotspot.mobileDataSetting(this)?:-1}")
-     if(stage=="p2p_wait_wifi")note("WIFI_WAIT","正在开启车机 Wi-Fi，以创建 Wi-Fi Direct 局域网。")
-     if(stage=="p2p_create_group")note("WIFI_WAIT","正在创建 Wi-Fi Direct 局域网。")
-    }
-   }catch(unavailable:WifiP2pHotspot.StartException){
-    recordRuntimeLink("p2p_start_failed","reason=${unavailable.reason}")
-    val prefix=if(unavailable.reason=="system_hotspot_active")"P2P_SYSTEM_HOTSPOT_ACTIVE" else "P2P_CONNECTION_FAILED"
-    throw IOException("$prefix ${unavailable.message}",unavailable)
-   }
-  }else if(LegacyCarHotspot.isAutoStartEnabled(this)){
-   try{
-    val prepared=LegacyCarHotspot.prepare(this,30000L,{closed}){stage->
-     val apEnabled=HybridNetwork.isApEnabled(this)
-     log("HYBRID_WIFI","stage=$stage wifiConnected=$apEnabled")
-     try{MainActivity.record(this,"HYBRID_WIFI",JSONObject().put("stage",stage).put("wifiConnected",apEnabled).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
-     if(stage=="ap_enable_requested")note("WIFI_WAIT","正在开启车载热点。")
-    }
-    prepared
-   }catch(unavailable:LegacyCarHotspotException){
-    try{MainActivity.record(this,"HYBRID_WIFI",JSONObject().put("stage","ap_auto_failed").put("reason",unavailable.reason).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
-    val prefix=if(LegacyCarHotspot.shouldOpenSystemSettings(unavailable.reason))"WIFI_OPEN_FALLBACK" else "WIFI_CHECK_SETTINGS"
-    throw IOException("$prefix ${unavailable.message}",unavailable)
-   }
-  }else awaitVehicleHotspot(30000L)
+  val hotspot=prepareWirelessNetwork()
   check()
   validateVehicleHotspot(hotspot)
   runtimeHotspot=hotspot
@@ -1764,7 +1780,7 @@ class WiredService:Service() {
      line.startsWith("iap2 availability wired=")->recordCarPlayAvailability(line)
      line.startsWith("iap2 rx=0x4e0d wireless-carplay-update available=")->recordWirelessAvailability(line)
      line=="iap2 identification accepted"->phase("mfi_authentication")
-     line=="iap2 authentication accepted"->{phase("phone_availability");note("AUTH_COMPLETE","iAP2 认证完成，等待 iPhone 接入车载热点")}
+     line=="iap2 authentication accepted"->{phase("phone_availability");note("AUTH_COMPLETE",if(useP2p)"iAP2 认证完成，等待 iPhone 接入车机 Wi-Fi Direct。" else "iAP2 认证完成，等待 iPhone 接入车载热点。")}
      line=="iap2 rx=0x5702 request-wifi-configuration"->recordStartupStep("wifi_config_requested","phone_availability","message=0x5702")
      line.startsWith("iap2 tx=0x5703")->{
       recordStartupStep("wifi_config_queued","phone_availability","message=0x5703")

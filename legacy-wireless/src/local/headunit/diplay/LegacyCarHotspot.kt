@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
+import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
@@ -49,8 +50,12 @@ object LegacyCarHotspot {
     }
 
     @JvmStatic
-    fun usesWifiDirect(context: Context): Boolean = isSupported(context) &&
-        context.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_DIRECT)
+    fun usesWifiDirect(context: Context): Boolean = runCatching {
+        val app = context.applicationContext ?: context
+        app.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_DIRECT) &&
+            app.getSystemService(Context.WIFI_SERVICE) is WifiManager &&
+            app.getSystemService(Context.WIFI_P2P_SERVICE) is WifiP2pManager
+    }.getOrDefault(false)
 
     @JvmStatic
     fun isMobileDataIsolationEnabled(context: Context): Boolean = isSupported(context) &&

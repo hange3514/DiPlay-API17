@@ -1,9 +1,10 @@
-DiPlay 0.1.126-call-ringback-test (versionCode 127), based on 0.1.125-phone-selection-test.
-Avoid repeated MX9A0 audio source writes when USB is confirmed, and buffer sparsely delivered early call audio.
+DiPlay 0.1.127-wifi-direct-compat (versionCode 128), based on 0.1.126-call-ringback-test.
+Prefer Wi-Fi Direct when Android advertises and exposes it, including on compatible non-MX9A0 head units.
+Verify the group owner's actual IPv4 binding and fall back on newly eligible head units only after safe P2P cleanup.
 Wireless startup tries the last successfully projected iPhone before other bonded phones.
 Try remaining bonded phones within the connection window after a confirmed peer failure.
 Default call downlink uses Android media output. The microphone tries ALSA first.
-Package: local.headunit.diplay.hybrid; versionCode 127; min API 17; ABI armeabi-v7a.
+Package: local.headunit.diplay.hybrid; versionCode 128; min API 17; ABI armeabi-v7a.
 Bluetooth protocol sources descend from GPL-3.0 DiPlay-Legacy-Nissan at 90a9a09f62292aab6fffa0896f83749c70f47d9f.
 Targets: Realtek CM390 with RTL8761BU firmware and Actions CM591 (10D7:B012).
 OEM reference: MX9A0 V4.2.2.30.170830 / Linux 3.0.35-svn54963.

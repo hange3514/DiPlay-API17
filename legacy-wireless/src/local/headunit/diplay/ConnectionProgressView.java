@@ -125,14 +125,14 @@ final class ConnectionProgressView extends View {
             nextDetail = "\u6b63\u901a\u8fc7 CM591 \u84dd\u7259\u901a\u9053\u4e0e iPhone \u5efa\u7acb CarPlay \u63a7\u5236\u4f1a\u8bdd";
             nextStep = 3;
         }
-        else if ("WIFI_WAIT".equals(stage)) {
-            nextTitle = "准备车载热点";
-            nextDetail = rawMessage == null || rawMessage.isEmpty() ? "正在检查车载热点地址" : rawMessage;
+        else if ("WIFI_WAIT".equals(stage) || "WIFI_DIRECT_FALLBACK".equals(stage)) {
+            nextTitle = "准备车机 Wi-Fi";
+            nextDetail = rawMessage == null || rawMessage.isEmpty() ? "正在检查车机 Wi-Fi 地址" : rawMessage;
             nextStep = 1;
         }
         else if ("WIFI_READY".equals(stage)) {
-            nextTitle = "车载热点已就绪";
-            nextDetail = "正在准备热点的投屏数据通道";
+            nextTitle = "车机 Wi-Fi 已就绪";
+            nextDetail = rawMessage == null || rawMessage.isEmpty() ? "正在准备投屏数据通道" : rawMessage;
             nextStep = 5;
         }
         else if ("HYBRID_WIFI_HANDOFF".equals(stage)) {
@@ -147,7 +147,7 @@ final class ConnectionProgressView extends View {
         }
         else if ("AUTH_COMPLETE".equals(stage)) {
             nextTitle = "\u8bf7\u6c42\u542f\u52a8\u65e0\u7ebf CarPlay";
-            nextDetail = "iAP2 认证完成，正在等待 iPhone 加入车载热点并接入投屏";
+            nextDetail = rawMessage == null || rawMessage.isEmpty() ? "iAP2 认证完成，正在等待 iPhone 接入投屏" : rawMessage;
             nextStep = 8;
         }
         else if ("PHONE_START".equals(stage)) {

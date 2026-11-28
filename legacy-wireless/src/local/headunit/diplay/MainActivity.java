@@ -12,6 +12,7 @@ public class MainActivity extends Activity {
  static int bluetoothEirProfile(Context context){return context.getSharedPreferences("hybrid_settings",MODE_PRIVATE).getInt(PREF_BT_EIR_PROFILE,0)==1?1:0;}
  static final String PREF_USB_BT_PEER = "usb_bt_remembered_peer";
  static final String EXTRA_RESELECT_PHONE = "reselect_phone";
+ static final String EXTRA_FORCE_SOFTAP = "force_softap";
  static final String EXTRA_UNAVAILABLE_IPHONES = "unavailable_iphones";
  private static final String SWITCH_PHONE_ACTION = "更换 iPhone";
 
@@ -128,8 +129,9 @@ public class MainActivity extends Activity {
  private String pendingHotspotPrompt;
  private WifiPurpose hotspotPromptPurpose, hotspotSettingsReturnPurpose;
  private WifiPurpose currentWifiPurpose = WifiPurpose.CONNECT;
- private boolean leftForHotspotSettings;
+ private boolean leftForHotspotSettings, disableHotspotForWifiDirect, forceSoftAp;
  private AlertDialog hotspotPrompt;
+ private Button hotspotSettingsButton;
  private static final String FRAME_RATE_ACTION = "画面帧率";
  private Button frameRateButton;
  private AlertDialog frameRateDialog;
@@ -209,11 +211,12 @@ public class MainActivity extends Activity {
   LinearLayout statusCard=new LinearLayout(this);statusCard.setOrientation(1);statusCard.setPadding(dp(16),dp(15),dp(16),dp(15));GradientDrawable cardBg=new GradientDrawable();cardBg.setColor(0xff111e2d);cardBg.setCornerRadius(dp(16));cardBg.setStroke(dp(1),0xff263c50);statusCard.setBackgroundDrawable(cardBg);
   LinearLayout statusLine=new LinearLayout(this);statusLine.setGravity(Gravity.CENTER_VERTICAL);View statusDot=new View(this);GradientDrawable dotBg=new GradientDrawable();dotBg.setColor(0xff38c7df);dotBg.setShape(GradientDrawable.OVAL);statusDot.setBackgroundDrawable(dotBg);LinearLayout.LayoutParams dotLp=new LinearLayout.LayoutParams(dp(9),dp(9));dotLp.rightMargin=dp(10);statusLine.addView(statusDot,dotLp);
   status=new TextView(this);status.setTextSize(16);status.setTypeface(android.graphics.Typeface.create("sans-serif-medium",0));status.setTextColor(0xffe6f0f8);status.setText("\u7b49\u5f85 iPhone");statusLine.addView(status);statusCard.addView(statusLine);
-  boolean wifiDirect = LegacyCarHotspot.usesWifiDirect(this);
-  operationStatus=new TextView(this);operationStatus.setTextSize(12);operationStatus.setTextColor(0xff91a8ba);operationStatus.setPadding(dp(19),dp(5),0,0);operationStatus.setText(wifiDirect?"投屏使用车机 Wi-Fi Direct 局域网。":"通过 CM390 或 CM591 连接 iPhone，投屏使用车载热点。");operationStatus.setVisibility(View.VISIBLE);statusCard.addView(operationStatus);root.addView(statusCard);
+  boolean wifiDirect = prefersWifiDirect();
+  operationStatus=new TextView(this);operationStatus.setTextSize(12);operationStatus.setTextColor(0xff91a8ba);operationStatus.setPadding(dp(19),dp(5),0,0);operationStatus.setText(wifiDirect?"投屏优先使用车机 Wi-Fi Direct。":"通过 CM390 或 CM591 连接 iPhone，投屏使用车载热点。");operationStatus.setVisibility(View.VISIBLE);statusCard.addView(operationStatus);root.addView(statusCard);
    button(root,"\u8fde\u63a5",new Runnable(){public void run(){requestManualConnection();}});
   button(root,"\u505c\u6b62",new Runnable(){public void run(){stopConnection();}});
-  if (!wifiDirect) button(root,"车载热点",new Runnable(){public void run(){showHotspotPassphraseDialog();}});
+  hotspotSettingsButton=button(root,"车载热点",new Runnable(){public void run(){showHotspotPassphraseDialog();}});
+  hotspotSettingsButton.setVisibility(wifiDirect ? View.GONE : View.VISIBLE);
   button(root,"在线更新",new Runnable(){public void run(){CompatibilityTools.checkForUpdate(MainActivity.this);}});
   button(root,"提交日志",new Runnable(){public void run(){CompatibilityTools.open(MainActivity.this);}});
   frameRateButton=button(root,FRAME_RATE_ACTION,new Runnable(){public void run(){showFrameRateDialog();}});
@@ -295,6 +298,7 @@ public class MainActivity extends Activity {
  }
  private void armBootAutoConnection(long now){
   clearHotspotRecovery();
+  setForceSoftAp(false);
   reselectPhoneForConnection=false;
   connectPending=true;
   connectPendingSince=now;
@@ -373,6 +377,18 @@ public class MainActivity extends Activity {
  }
 
  int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
+
+ private boolean prefersWifiDirect() {
+  return !forceSoftAp && LegacyCarHotspot.usesWifiDirect(this);
+ }
+
+ private void setForceSoftAp(boolean force) {
+  if (forceSoftAp == force) return;
+  forceSoftAp = force;
+  if (hotspotSettingsButton != null) {
+   hotspotSettingsButton.setVisibility(prefersWifiDirect() ? View.GONE : View.VISIBLE);
+  }
+ }
 
  private void showHotspotPassphraseDialog() {
   if (busy || maintenance || closed) return;
@@ -467,7 +483,7 @@ public class MainActivity extends Activity {
    connectPendingSince = 0;
    uiHandler.removeCallbacks(tryConnection);
   }
-  if (LegacyCarHotspot.usesWifiDirect(this)) {
+  if (prefersWifiDirect()) {
    if (connectAfter) enqueueManualConnection(purpose);
    return;
   }
@@ -531,12 +547,13 @@ public class MainActivity extends Activity {
   } else {
    detail = "暂时读不到系统热点配置。请检查车载热点设置，保存后重试。";
   }
-  queueHotspotPrompt(detail, purpose);
+  queueHotspotPrompt(detail, purpose, false);
  }
 
- private void queueHotspotPrompt(String detail, WifiPurpose purpose) {
+ private void queueHotspotPrompt(String detail, WifiPurpose purpose, boolean disableHotspot) {
   pendingHotspotPrompt = detail;
   hotspotPromptPurpose = purpose;
+  disableHotspotForWifiDirect = disableHotspot;
   showOperation(detail);
   continueHotspotRecovery();
  }
@@ -546,6 +563,7 @@ public class MainActivity extends Activity {
   hotspotPromptPurpose = null;
   hotspotSettingsReturnPurpose = null;
   leftForHotspotSettings = false;
+  disableHotspotForWifiDirect = false;
   if (hotspotPrompt != null) hotspotPrompt.dismiss();
  }
 
@@ -560,14 +578,14 @@ public class MainActivity extends Activity {
   }
   if (pendingHotspotPrompt == null || hotspotPrompt != null) return;
   final WifiPurpose purpose = hotspotPromptPurpose;
-  boolean p2p = LegacyCarHotspot.usesWifiDirect(this);
+  final boolean disableHotspot = disableHotspotForWifiDirect;
   final AlertDialog dialog = new AlertDialog.Builder(this)
-      .setTitle(p2p ? "关闭系统热点" : "车载热点未就绪")
-      .setMessage(pendingHotspotPrompt + (purpose == null ? "" : "\n打开或修正热点后返回 DiPlay，将继续连接。"))
+      .setTitle(disableHotspot ? "关闭系统热点" : "车载热点未就绪")
+      .setMessage(pendingHotspotPrompt + (purpose == null ? "" : "\n调整热点后返回 DiPlay，将继续连接。"))
       .setPositiveButton("打开热点设置", new DialogInterface.OnClickListener() {
        public void onClick(DialogInterface ignored, int which) {
         clearHotspotRecovery();
-        openSystemHotspotSettings(purpose);
+        openSystemHotspotSettings(purpose, disableHotspot);
        }
       })
       .setNegativeButton("取消", new DialogInterface.OnClickListener() {
@@ -587,10 +605,9 @@ public class MainActivity extends Activity {
   }
  }
 
- private void openSystemHotspotSettings() { openSystemHotspotSettings(null); }
+ private void openSystemHotspotSettings() { openSystemHotspotSettings(null, false); }
 
- private void openSystemHotspotSettings(WifiPurpose resumePurpose) {
-  boolean p2p = LegacyCarHotspot.usesWifiDirect(this);
+ private void openSystemHotspotSettings(WifiPurpose resumePurpose, boolean disableHotspot) {
   hotspotSettingsReturnPurpose = resumePurpose;
   leftForHotspotSettings = false;
   try {
@@ -600,11 +617,11 @@ public class MainActivity extends Activity {
     startActivity(new Intent(android.provider.Settings.ACTION_SETTINGS));
    } catch (RuntimeException noSettings) {
     hotspotSettingsReturnPurpose = null;
-    showOperation(p2p ? "请手动关闭车机系统热点。" : "请手动打开车机系统设置里的便携式 Wi-Fi 热点。");
+    showOperation(disableHotspot ? "请手动关闭车机系统热点。" : "请手动打开车机系统设置里的便携式 Wi-Fi 热点。");
     return;
    }
   }
-  showOperation(p2p ? "关闭车机系统热点后，返回 DiPlay 点「连接」。"
+  showOperation(disableHotspot ? "关闭车机系统热点后，返回 DiPlay 点「连接」。"
       : resumePurpose == null ? "开启车载热点后，返回 DiPlay 点「连接」。"
       : "在系统中打开车载热点后返回 DiPlay，将继续连接。");
  }
@@ -1067,6 +1084,7 @@ public class MainActivity extends Activity {
  private void stopConnectionCore(boolean userRequested){
   wifiSetupRequest++;
   clearHotspotRecovery();
+  if(userRequested)setForceSoftAp(false);
   recordAutoConnectDecision("queue_cancelled","user_stop",null,0);
   if(runtimeReconnectPreviousId!=null)recordRuntimeReconnect("retry_cancelled","user_stop");
   resetPermissionConnectionRequest();
@@ -1327,7 +1345,25 @@ public class MainActivity extends Activity {
   return delivered;
  }
  void lifecycle(String event){try{record(this,"PROJECTION_UI",new JSONObject().put("event",event).put("connection",connectionId).put("surfaceValid",preview!=null&&preview.getHolder().getSurface().isValid()));}catch(Exception ignored){}}
- void restoreConnection(){String id=WiredService.currentConnectionId();if(id.length()>0){if(id.equals(runtimeReconnectPreviousId))return;clearRuntimeReconnect();boolean restored=!connecting||!id.equals(connectionId);connectionId=id;connecting=true;connectPending=false;connectPendingSince=0;videoReady=WiredService.isVideoReady();probeAddress=WiredService.currentProbeUrl();uiStage=videoReady?"VIDEO_READY":WiredService.currentProgressStage();String progressMessage=WiredService.currentProgressMessage();if(probeAddress!=null&&"PHONE_START".equals(uiStage))progressMessage="PHONE_PROBE "+probeAddress;if(preview.getHolder().getSurface().isValid())WiredService.attachSurface(this,preview.getHolder().getSurface());if(restored){setConnectionStage(uiStage,progressMessage);setProjectionMode(true);}}else if(connecting){connecting=false;connectPending=false;connectPendingSince=0;videoReady=false;probeAddress=null;setProjectionMode(false);}}
+ void restoreConnection(){
+  String id=WiredService.currentConnectionId();
+  if(id.length()>0){
+   if(id.equals(runtimeReconnectPreviousId))return;
+   clearRuntimeReconnect();
+   boolean restored=!connecting||!id.equals(connectionId);
+   connectionId=id;connecting=true;connectPending=false;connectPendingSince=0;
+   setForceSoftAp(WiredService.usesSoftApForConnection(id));
+   videoReady=WiredService.isVideoReady();probeAddress=WiredService.currentProbeUrl();
+   uiStage=videoReady?"VIDEO_READY":WiredService.currentProgressStage();
+   String progressMessage=WiredService.currentProgressMessage();
+   if(probeAddress!=null&&"PHONE_START".equals(uiStage))progressMessage="PHONE_PROBE "+probeAddress;
+   if(preview.getHolder().getSurface().isValid())WiredService.attachSurface(this,preview.getHolder().getSurface());
+   if(restored){setConnectionStage(uiStage,progressMessage);setProjectionMode(true);}
+  }else if(connecting){
+   connecting=false;connectPending=false;connectPendingSince=0;videoReady=false;probeAddress=null;
+   setProjectionMode(false);
+  }
+ }
 
  private void recordUsbBluetoothScan(int candidateCount,int deviceCount){
   long now=SystemClock.elapsedRealtime();
@@ -1422,14 +1458,14 @@ public class MainActivity extends Activity {
   setConnectionStage(uiStage,"");
   setProjectionMode(!runtimeReconnect||projectionMode);
   onProjectionSurfaceAvailable();
-  boolean p2p=LegacyCarHotspot.usesWifiDirect(this);
+  boolean p2p=prefersWifiDirect();
   showOperation(p2p ? "正在准备 Wi-Fi Direct 和蓝牙连接…" : "正在准备车载热点和蓝牙连接…");
   try{record(this,"NETWORK_BACKEND_SELECTED",new JSONObject().put("backend",p2p?"android_wifi_p2p_go":"android_wifi_softap").put("transportMode",p2p?"usb_bt_p2p_data":"usb_bt_softap_data").put("vpnRequired",false).put("ipv4",true).put("tcp",true).put("udp",true).put("uptimeMs",SystemClock.elapsedRealtime()));}catch(Exception ignored){}
   try{
    Intent launch=new Intent(this,WiredService.class).putExtra("connection_id",connectionId)
        .putExtra("request_started_at",requestStartedAt).putExtra("usb_bt_device",usbBtDevice)
         .putExtra(EXTRA_RESELECT_PHONE,reselectPhone).putExtra("boot_auto_connect",autoConnectArmed)
-        .putExtra("runtime_reconnect",runtimeReconnect);
+        .putExtra("runtime_reconnect",runtimeReconnect).putExtra(EXTRA_FORCE_SOFTAP,forceSoftAp);
    if(unavailablePhones!=null)launch.putStringArrayListExtra(EXTRA_UNAVAILABLE_IPHONES,unavailablePhones);
    if(benchmarkFps>0)launch.putExtra(WiredService.EXTRA_BENCHMARK_FPS,benchmarkFps);
    startService(launch);
@@ -1458,6 +1494,10 @@ public class MainActivity extends Activity {
  private void handleConnectionStatus(String id,String stage,String message,boolean bootRetryable,UsbDevice recoveryDevice,
                                      ArrayList<String> unavailablePhones,long startedAt){
   if(id==null||id.isEmpty()||!id.equals(connectionId)||stage==null)return;
+  if("WIFI_DIRECT_FALLBACK".equals(stage)){
+   setForceSoftAp(true);
+   showOperation("Wi-Fi Direct 未就绪，正在检查车载热点。");
+  }
   setConnectionStage(stage,message);
   if("VIDEO_READY".equals(stage)){
    clearHotspotRecovery();
@@ -1509,19 +1549,20 @@ public class MainActivity extends Activity {
 
   if("FAILED".equals(stage)){
    status.setText("连接未完成");
-   boolean p2p=LegacyCarHotspot.usesWifiDirect(this);
    canReselectPhone=message!=null&&message.startsWith("IOException: BT_RESELECT_PHONE ");
-   canReviewWifi=!p2p&&message!=null&&message.startsWith(WIFI_REVIEW_FAILURE);
-   if(p2p&&message!=null&&message.startsWith(P2P_HOTSPOT_ACTIVE_FAILURE)){
+   canReviewWifi=message!=null&&message.startsWith(WIFI_REVIEW_FAILURE);
+   if(message!=null&&message.startsWith(P2P_HOTSPOT_ACTIVE_FAILURE)){
     String detail=message.substring(P2P_HOTSPOT_ACTIVE_FAILURE.length()).split(" → ",2)[0];
-    queueHotspotPrompt(detail,null);
-   }else if(p2p&&message!=null&&message.startsWith(P2P_CONNECTION_FAILURE)){
+    queueHotspotPrompt(detail,null,true);
+   }else if(message!=null&&message.startsWith(P2P_CONNECTION_FAILURE)){
     String detail=message.substring(P2P_CONNECTION_FAILURE.length()).split(" → ",2)[0];
     showOperation(detail);
-   }else if(!p2p&&message!=null&&message.startsWith(WIFI_OPEN_FAILURE)){
+   }else if(message!=null&&message.startsWith(WIFI_OPEN_FAILURE)){
+    setForceSoftAp(true);
     String detail=message.substring(WIFI_OPEN_FAILURE.length()).split(" → ",2)[0];
-    queueHotspotPrompt(detail,currentWifiPurpose);
+    queueHotspotPrompt(detail,currentWifiPurpose,false);
    }else if(canReviewWifi){
+    setForceSoftAp(true);
     String detail=message.substring(WIFI_REVIEW_FAILURE.length()).split(" → ",2)[0];
     showOperation(detail+" 点击「连接」可检查后重试。");
    }else{

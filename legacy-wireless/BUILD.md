@@ -1,6 +1,6 @@
 # DiPlay 无线 API 17 构建说明
 
-此目录对应 `0.1.126-call-ringback-test`，包名为 `local.headunit.diplay.hybrid`，versionCode 为 `127`。公开构建脚本用环境变量读取本地工具链和签名配置。
+此目录对应 `0.1.127-wifi-direct-compat`，包名为 `local.headunit.diplay.hybrid`，versionCode 为 `128`。公开构建脚本用环境变量读取本地工具链和签名配置。
 
 ## 构建输入
 
@@ -11,4 +11,4 @@
 - iPhone 握手需要 `assets/offline-mfi/certificate.p7b` 和 `assets/offline-mfi/identity.pk8`。构建者可在本机提供自己有权使用的材料，路径已加入忽略规则。发行包的材料来源见 [认证材料说明](../docs/AUTH_PROVENANCE.md)。
 - 使用自己的 Android keystore，在当前 PowerShell 进程设置 `DIPLAY_SIGNING_KEYSTORE`、`DIPLAY_SIGNING_ALIAS`、`DIPLAY_SIGNING_STORE_PASSWORD` 和 `DIPLAY_SIGNING_KEY_PASSWORD`。口令直接通过环境变量交给 `apksigner`。自签构建需要与已有安装的 Android 签名一致才能覆盖安装。
 
-在此目录运行 `python build.py`。APK 位于 `dist/`，中间产物和本地编译输出位于 `build/`。发行 APK 和校验值见 [无线 0.1.126 发布说明](../docs/WIRELESS_0.1.126_CALL_RINGBACK.md)。
+在此目录运行 `python build.py`。APK 位于 `dist/`，中间产物和本地编译输出位于 `build/`。发行 APK 和校验值见 [无线 0.1.127 发布说明](../docs/WIRELESS_0.1.127_WIFI_DIRECT_COMPAT.md)。

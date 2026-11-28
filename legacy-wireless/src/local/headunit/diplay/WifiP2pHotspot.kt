@@ -15,6 +15,7 @@ import android.util.Log
 import com.shilapi.xcertplay.transport.Iap2WirelessSecurity
 import java.io.Closeable
 import java.io.IOException
+import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.NetworkInterface
@@ -25,14 +26,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Owns one autonomous API 17 P2P group used as a local Wi-Fi access point. */
 internal class WifiP2pHotspot(context: Context) : Closeable {
-    internal class StartException(val reason: String, message: String, cause: Throwable? = null) :
-        IOException(message, cause)
+    internal class StartException(
+        val reason: String,
+        message: String,
+        cause: Throwable? = null,
+        val safeToUseSoftAp: Boolean = false,
+    ) : IOException(message, cause)
 
     private data class GroupIdentity(val ssid: String, val interfaceName: String, val owner: String?)
     private class ClientSample(
         val manager: WifiP2pManager,
         val channel: WifiP2pManager.Channel,
         val group: GroupIdentity,
+        val ownerAddress: Inet4Address,
     )
 
     private val app = context.applicationContext ?: context
@@ -58,16 +64,21 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
                 startGroup(stopped, onStage)
             } catch (failure: Exception) {
                 closed.set(true)
-                runCatching { release() }
-                when (failure) {
-                    is StartException, is InterruptedException -> throw failure
-                    is SecurityException -> throw StartException(
+                val released = runCatching { release() }.getOrDefault(false)
+                val error = when (failure) {
+                    is InterruptedException -> throw failure
+                    is StartException -> failure
+                    is SecurityException -> StartException(
                         "p2p_permission_denied", "系统拒绝开启 Wi‑Fi Direct。请检查应用权限。", failure,
                     )
-                    else -> throw StartException(
+                    else -> StartException(
                         "p2p_system_error", "开启 Wi‑Fi Direct 时系统出现异常。请提交无线版日志。", failure,
                     )
                 }
+                if (allowsSoftApFallback(error.reason, released)) {
+                    throw StartException(error.reason, error.message.orEmpty(), error.cause, safeToUseSoftAp = true)
+                }
+                throw error
             }
         }
 
@@ -136,13 +147,12 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
                     ?: throw StartException("p2p_local_group_missing", "系统未返回完整的本机 Wi‑Fi Direct 热点信息。")
                 own(identity)
                 val connection = requestConnection(p2p, p2pChannel).require(REQUEST_TIMEOUT_MS, stopped)
-                if (connection?.groupFormed == true && connection.isGroupOwner &&
-                    connection.groupOwnerAddress == GO_ADDRESS
-                ) {
-                    val snapshot = readBinding(group, identity)
+                val ownerAddress = usableOwnerAddress(connection?.groupOwnerAddress)
+                if (connection?.groupFormed == true && connection.isGroupOwner && ownerAddress != null) {
+                    val snapshot = readBinding(group, identity, ownerAddress)
                     if (snapshot != null) {
                         checkCancelled(stopped)
-                        clientSample = ClientSample(p2p, p2pChannel, identity)
+                        clientSample = ClientSample(p2p, p2pChannel, identity, ownerAddress)
                         onStage("p2p_ip_ready")
                         return snapshot
                     }
@@ -159,11 +169,11 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
         checkCancelled { closed.get() }
         val p2p = manager ?: throw stoppedError()
         val p2pChannel = channel ?: throw stoppedError()
-        val active = ownedGroup ?: throw stoppedError()
+        val active = clientSample ?: throw stoppedError()
         val group = requestGroup(p2p, p2pChannel).require(REQUEST_TIMEOUT_MS) { closed.get() }
             ?: throw stoppedError()
-        if (groupIdentity(group) != active) throw stoppedError()
-        readBinding(group, active) ?: throw stoppedError()
+        if (groupIdentity(group) != active.group) throw stoppedError()
+        readBinding(group, active.group, active.ownerAddress) ?: throw stoppedError()
     }
 
     /** Counts stations reported by the owned group. This is independent of DHCP or AirPlay. */
@@ -187,22 +197,24 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
         synchronized(lock) { release() }
     }
 
-    private fun release() {
+    private fun release(): Boolean {
         val interrupted = Thread.interrupted()
         try {
             val p2p = manager
             val p2pChannel = channel
             val wifiManager = wifi
-            if (p2p != null && p2pChannel != null && wifiManager != null && canReleaseGroup(wifiManager)) {
-                val safeToRestoreWifi = releaseGroup(p2p, p2pChannel, wifiManager)
-                if (enabledWifi && safeToRestoreWifi && canReleaseGroup(wifiManager)) {
-                    restoreWifi(wifiManager)
+            if (wifiManager == null) return !enabledWifi && createRequest == null && ownedGroup == null
+            if (!canReleaseGroup(wifiManager)) {
+                if (ownedGroup != null) {
+                    Log.w(TAG, "P2P teardown skipped because another system tether could be affected")
                 }
-            } else if (p2pChannel == null && enabledWifi && wifiManager != null && canReleaseGroup(wifiManager)) {
-                restoreWifi(wifiManager)
-            } else if (ownedGroup != null) {
-                Log.w(TAG, "P2P teardown skipped because another system tether could be affected")
+                return false
             }
+            val groupReleased = if (p2p != null && p2pChannel != null) {
+                releaseGroup(p2p, p2pChannel, wifiManager)
+            } else createRequest == null && ownedGroup == null
+            if (!groupReleased) return false
+            return !enabledWifi || (canReleaseGroup(wifiManager) && restoreWifi(wifiManager))
         } catch (failure: InterruptedException) {
             Thread.currentThread().interrupt()
             throw IOException("Wi-Fi Direct cleanup was interrupted", failure)
@@ -220,8 +232,10 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
         }
     }
 
-    private fun restoreWifi(manager: WifiManager) {
-        if (!manager.setWifiEnabled(false)) Log.w(TAG, "Wi-Fi state restoration was rejected")
+    private fun restoreWifi(manager: WifiManager): Boolean {
+        val accepted = manager.setWifiEnabled(false)
+        if (!accepted) Log.w(TAG, "Wi-Fi state restoration was rejected")
+        return accepted
     }
 
     private fun releaseGroup(
@@ -290,10 +304,16 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
         return GroupIdentity(ssid, interfaceName, group.owner?.deviceAddress)
     }
 
-    private fun readBinding(group: WifiP2pGroup, identity: GroupIdentity): HybridNetworkSnapshot? {
+    private fun readBinding(
+        group: WifiP2pGroup,
+        identity: GroupIdentity,
+        ownerAddress: Inet4Address,
+    ): HybridNetworkSnapshot? {
         val passphrase = group.passphrase?.takeIf(HybridNetwork::isHotspotPassphrase) ?: return null
         val iface = NetworkInterface.getByName(identity.interfaceName)?.takeIf { it.isUp } ?: return null
-        if (iface.interfaceAddresses.none { it.address == GO_ADDRESS && it.networkPrefixLength.toInt() == 24 }) return null
+        val prefix = iface.interfaceAddresses.firstNotNullOfOrNull { address ->
+            address.networkPrefixLength.toInt().takeIf { address.address == ownerAddress && it in 1..30 }
+        } ?: return null
         val linkLocal = runCatching {
             Collections.list(iface.inetAddresses)
                 .filterIsInstance<Inet6Address>()
@@ -303,8 +323,8 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
         }.getOrNull()
         val wlanMac = runCatching { NetworkInterface.getByName("wlan0")?.hardwareAddress }.getOrNull()
         return HybridNetworkSnapshot(
-            identity.ssid, GO_ADDRESS, linkLocal, HybridNetwork.receiverMac(app, wlanMac), null,
-            iface.name, HybridNetwork.prefixMask(24), 0, SystemClock.elapsedRealtime(),
+            identity.ssid, ownerAddress, linkLocal, HybridNetwork.receiverMac(app, wlanMac), null,
+            iface.name, HybridNetwork.prefixMask(prefix), 0, SystemClock.elapsedRealtime(),
             HybridWifiCredential(passphrase, Iap2WirelessSecurity.WPA_WPA2, "p2p_generated", true),
             "unavailable", "wifi_p2p_group",
         )
@@ -381,17 +401,26 @@ internal class WifiP2pHotspot(context: Context) : Closeable {
         fun await(timeoutMs: Long): Boolean = ready.await(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
-    private companion object {
-        val GO_ADDRESS: InetAddress = InetAddress.getByAddress(byteArrayOf(-64, -88, 49, 1))
-        val SAFE_INTERFACE = Regex("[A-Za-z][A-Za-z0-9_.-]{0,15}")
-        const val TAG = "DiPlayWifiP2p"
-        const val TETHER_STATE_CHANGED = "android.net.conn.TETHER_STATE_CHANGED"
-        const val AP_DISABLED = 11
-        const val AP_FAILED = 14
-        const val ACTION_SUCCESS = -1
-        const val POLL_MS = 120L
-        const val REQUEST_TIMEOUT_MS = 800L
-        const val WIFI_START_TIMEOUT_MS = 6000L
-        const val GROUP_START_TIMEOUT_MS = 10000L
+    companion object {
+        internal fun allowsSoftApFallback(reason: String, groupReleased: Boolean): Boolean =
+            groupReleased && reason != "system_hotspot_active" &&
+                reason != "system_tethering_in_use" && reason != "p2p_group_in_use"
+
+        internal fun usableOwnerAddress(address: InetAddress?): Inet4Address? =
+            (address as? Inet4Address)?.takeUnless {
+                it.isAnyLocalAddress || it.isLoopbackAddress || it.isLinkLocalAddress ||
+                    it.isMulticastAddress || it.hostAddress == "255.255.255.255"
+            }
+
+        private val SAFE_INTERFACE = Regex("[A-Za-z][A-Za-z0-9_.-]{0,15}")
+        private const val TAG = "DiPlayWifiP2p"
+        private const val TETHER_STATE_CHANGED = "android.net.conn.TETHER_STATE_CHANGED"
+        private const val AP_DISABLED = 11
+        private const val AP_FAILED = 14
+        private const val ACTION_SUCCESS = -1
+        private const val POLL_MS = 120L
+        private const val REQUEST_TIMEOUT_MS = 800L
+        private const val WIFI_START_TIMEOUT_MS = 6000L
+        private const val GROUP_START_TIMEOUT_MS = 10000L
     }
 }
