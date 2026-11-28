@@ -20,6 +20,13 @@
 | **有线 CarPlay 0.44.52** | [**下载有线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/v0.44.52/DiPlay_API17_0.44.52.apk) | USB 数据线连接 iPhone，支持最高 60 FPS 配置与双指触控转发。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.52) |
 | **无线 CarPlay 0.1.117** | [**下载无线 APK**](https://github.com/hange3514/DiPlay-API17/releases/download/wireless-v0.1.117/DiPlay_API17_0.1.117-auto-evidence.apk) | 实车使用绿联 CM591（`10D7:B012`），iPhone 自动加入车机的 Wi-Fi Direct 局域网。默认 20 FPS，可调至 60 FPS。[版本说明](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.117) |
 
+### 外拨回铃音测试版
+
+- **有线 0.44.61** 增加约 48 毫秒的通话和提示音预缓冲，减少回铃开头断续和重复切换车机音源。[下载 APK 与更新说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.61-call-ringback-test)
+- **无线 0.1.126** 为外拨回铃和间隔较长的提示音调整缓冲恢复，同时保留接通后语音和正常媒体播放的处理路径。[下载 APK 与更新说明](https://github.com/hange3514/DiPlay-API17/releases/tag/wireless-v0.1.126-call-ringback-test)
+
+有线和无线分别通过 532 项和 353 项本地回归测试及 API 17 签名校验。回铃改善效果待实车确认。
+
 ### 多手机切换测试版
 
 - **有线 0.44.60** 改进快速拔插切换，按本次 USB 授权请求和当前设备确认连接，避免旧手机的授权或画面回调影响下一台。[下载与更新说明](https://github.com/hange3514/DiPlay-API17/releases/tag/v0.44.60-phone-switch-test)
