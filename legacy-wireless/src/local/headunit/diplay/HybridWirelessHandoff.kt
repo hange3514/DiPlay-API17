@@ -5,6 +5,7 @@ import com.shilapi.xcertplay.airplay.AirPlayConfig
 import com.shilapi.xcertplay.airplay.AirPlayIdentity
 import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.iap2.session.Iap2Session
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
@@ -38,6 +39,7 @@ internal class HybridWirelessHandoff(
     ipv6Address: Inet6Address?,
     private val phoneBluetoothAddress: () -> String?,
     private val onTunnelReady: () -> Unit = {},
+    private val onCallState: (Iap2Frame) -> Unit = {},
     private val locationProvider: () -> Iap2LocationProvider? = { null },
     private val report: (String, JSONObject) -> Unit,
 ) : Closeable {
@@ -229,6 +231,9 @@ internal class HybridWirelessHandoff(
                         onIncoming = { frame ->
                             forwardedFrameCount.incrementAndGet()
                             lastForwardedMessageId.set(frame.messageId)
+                            if (frame.messageId == CallAudioPhase.UPDATE_MESSAGE &&
+                                !closed.get() && !owner.isClosed && activeTunnel.get() === channel
+                            ) onCallState(frame)
                         },
                         onProgress = { line ->
                             when {

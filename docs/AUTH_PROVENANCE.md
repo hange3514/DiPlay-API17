@@ -29,3 +29,7 @@ GitHub Release `v0.44.49-usb-reattach-focus-beta` 中的 APK 也包含上述同�
 ## 有线 `v0.44.52` 和无线 `wireless-v0.1.117`
 
 两份 Release APK 与在线更新包逐字节一致。对比此前公开 APK，两份的 `assets/` 条目及其内容均一致，内置的两个附件身份文件沿用上表哈希。对应源码使用构建者本机提供的签名和附件身份材料。
+
+## 回铃音测试版 `wireless-v0.1.126-call-ringback-test`
+
+该 APK 与车机在线更新包逐字节一致。两份内置附件身份文件与上一公开测试版 `wireless-v0.1.125-phone-selection-test` 一致。构建者在本机准备签名和附件身份。

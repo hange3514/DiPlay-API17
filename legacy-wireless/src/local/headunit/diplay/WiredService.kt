@@ -235,6 +235,7 @@ class WiredService:Service() {
  @Volatile private var runtimePhoneBluetooth:String?=null
  @Volatile private var connectionId=""
  private val bornAt=SystemClock.elapsedRealtime()
+ private val callAudioPhase=CallAudioPhase()
  private val startup=ConnectionTimings(bornAt)
  private var requestStartedAt=bornAt
  private var selectedFps=PlaybackOptions.DEFAULT_FPS
@@ -1540,7 +1541,8 @@ class WiredService:Service() {
   phase("airplay_listener")
   note("HYBRID_WIFI_HANDOFF",if(useP2p)"正在 Wi-Fi Direct 网卡上启动 AirPlay。" else "正在车载热点网卡上启动 AirPlay。")
   val preferredDecoder=if(LegacyCarHotspot.isSupported(this))mx9a0AvcDecoder else null
-  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,preferredDecoder){log("MEDIA",it)}
+  val renderer=LegacyMedia(null,ProjectionConfig.WIDTH,ProjectionConfig.HEIGHT,preferredDecoder,
+   outgoingCallSetup={callAudioPhase.outgoingSetup}){log("MEDIA",it)}
   renderer.onVideoFailure={fail(IOException("video decode failure",it),"video_decoder")};renderer.routing=AudioRouting(this,renderer);own(renderer,"media");synchronized(Companion){sink=renderer;renderer.setSurface(surface)}
   val media=CarPlayMediaEngine(renderer,true);val pairings=store.pairings()
   val ipv6ListenerAvailable=ipv6Address!=null
@@ -1634,6 +1636,7 @@ class WiredService:Service() {
    this,wifi.localAddress,configAir,identity,runtimeIdent,endpoint,auth,
    ipv6Address,authenticatedPhoneAddress::get,
     onTunnelReady=::maybeReleaseBluetoothBootstrap,
+    onCallState={frame->recordCallAudioPhase(frame,"airplay_tunnel")},
     locationProvider={LegacyCarPlayLocationProvider(this,vehicleSignals,offerGnss,offerCanSpeed){summary->
      recordVehicleIntegration(if(summary.startsWith("yaw_estimate "))"yaw_estimate" else "location_source",summary)
     }},
@@ -1743,6 +1746,7 @@ class WiredService:Service() {
      .put("apBssidPresent",wifi.apBssid!=null).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
    },
    onIncoming={frame->
+    recordCallAudioPhase(frame,"usb_bluetooth")
     when(frame.messageId){
      0x5201->routeMetadata.incrementAndGet(0)
      0x5202->routeMetadata.incrementAndGet(1)
@@ -1853,6 +1857,13 @@ class WiredService:Service() {
    return
   }
   if(!closed){if(videoReady)log("HYBRID_WIFI_SESSION_END","videoReady=true sessionCount=${sessions.size} usbLinked=$usbLinked");shutdown()}
+ }
+
+ private fun recordCallAudioPhase(frame:com.shilapi.xcertplay.iap2.wire.Iap2Frame,origin:String){
+  if(!closed)callAudioPhase.accept(frame){stage->
+   try{MainActivity.record(this,"CALL_STATE_PHASE",JSONObject().put("stage",stage.label).put("origin",origin)
+    .put("connection",connectionId).put("elapsedMs",SystemClock.elapsedRealtime()-bornAt))}catch(_:Exception){}
+  }
  }
  private fun bindAirPlayIpv4(address:InetAddress):ServerSocket{
   val listener=try{

@@ -26,7 +26,7 @@ internal class SpeechPlayoutTuning(role: String) {
     }
 
     /** Use packet arrival time so a delayed worker cannot turn its own delay into network jitter. */
-    fun prefillFor(arrivedNs: Long): Boolean {
+    fun prefillFor(arrivedNs: Long, resumeAfterQuiet: Boolean = false): Boolean {
         val drySince = drySinceNs
         drySinceNs = null
         if (!started) {
@@ -35,10 +35,11 @@ internal class SpeechPlayoutTuning(role: String) {
         }
         if (drySince == null) return false
         val dryForNs = arrivedNs - drySince
-        if (dryForNs !in MIN_DRY_NS..MAX_DRY_NS) return false
-
-        shortDryEvents++
-        maxShortDryMs = maxOf(maxShortDryMs, dryForNs / NS_PER_MS)
+        if (dryForNs < MIN_DRY_NS) return false
+        if (dryForNs <= MAX_DRY_NS) {
+            shortDryEvents++
+            maxShortDryMs = maxOf(maxShortDryMs, dryForNs / NS_PER_MS)
+        } else if (!resumeAfterQuiet) return false
         val previous = lastRebufferNs
         if (previous != null && arrivedNs - previous < REBUFFER_COOLDOWN_NS) return false
         lastRebufferNs = arrivedNs

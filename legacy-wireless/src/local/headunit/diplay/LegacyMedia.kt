@@ -13,7 +13,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 private data class LegacyAlsaOpened(val candidate:AlsaCapturePathSelector.Candidate,val handle:Long,val rate:Int,val channels:Int)
 
 /** Bounded API17 media workers. No modern AudioAttributes or codec buffer APIs. */
-class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,private val preferredAvcDecoder:String?,private val log:(String)->Unit):MediaSink,Closeable {
+class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,private val preferredAvcDecoder:String?,
+ private val outgoingCallSetup:()->Boolean={false},private val log:(String)->Unit):MediaSink,Closeable {
  private val siriCapture=SiriCapturePolicy()
  fun speechMode(params:Map<String,Any?>){if(siriCapture.update(params))log("microphone_speech_mode=${siriCapture.mode}")}
  private class VideoTarget(val surface:Surface?,config:ByteArray?=null){
@@ -469,7 +470,8 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
   private val music=role=="media"
   private val realtime=id.type!=BufferedAudioStream.STREAM_TYPE
   private val realtimeMusic=music&&realtime
-  private val speechTiming=if(realtime&&!music)SpeechPlayoutTuning(role)else null
+  private val alertAudio=f.audioType.equals("alert",ignoreCase=true)
+  private val speechTiming=if(realtime&&!music)SpeechPlayoutTuning(if(alertAudio)"call" else role)else null
   private val stop=AtomicBoolean(false)
   // A full 700 ms target can contain 280 short Opus frames. The independent byte cap also bounds LPCM.
   private val queue=when{
@@ -887,10 +889,14 @@ class LegacyMedia(surface:Surface?,private val width:Int,private val height:Int,
       if(queue.expired(p)){queue.drop();pending=null;continue}
       musicPrimed=true
      }
-     if(speechTiming?.prefillFor(p.arrivedNs)==true){
-      rtpOrder?.awaitPrefill(p,f.sampleRate*speechTiming.targetMs/1000,speechTiming.maxWaitMs)
+     if(speechTiming?.prefillFor(p.arrivedNs,resumeAfterQuiet=alertAudio||(role=="call"&&outgoingCallSetup()))==true){
+      val bufferedFrames=rtpOrder?.awaitPrefill(p,f.sampleRate*speechTiming.targetMs/1000,speechTiming.maxWaitMs)?:0
       if(stop.get())break
       if(queue.expired(p)){queue.drop();speechTiming.reset();pending=null;continue}
+      if(alertAudio||role=="call"){
+       val kind=if(alertAudio)"alert" else "telephony"
+       log("audio_speech_playout eventType=audio_speech_playout stage=prefill role=$role kind=$kind targetMs=${speechTiming.targetMs} bufferedMs=${bufferedFrames*1000L/f.sampleRate} rebufferCount=${speechTiming.rebufferCount}")
+      }
      }
      val c=decoder
      if(music)maxMusicQueueAgeNs=maxOf(maxMusicQueueAgeNs,System.nanoTime()-p.arrivedNs)

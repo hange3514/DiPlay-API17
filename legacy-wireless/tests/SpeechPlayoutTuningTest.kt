@@ -72,5 +72,18 @@ class SpeechPlayoutTuningTest {
         assertEquals(0L, tuning.shortDryEvents)
     }
 
+    @Test fun sparseRingbackCanPrimeEachBurstWithoutChangingConnectedSpeech() {
+        val ringback = SpeechPlayoutTuning("call")
+        assertTrue(ringback.prefillFor(ms(0), resumeAfterQuiet = true))
+        ringback.markDry(ms(100))
+        assertTrue(ringback.prefillFor(ms(800), resumeAfterQuiet = true))
+        assertEquals(1L, ringback.rebufferCount)
+        assertEquals(0L, ringback.shortDryEvents)
+
+        ringback.markDry(ms(900))
+        assertFalse(ringback.prefillFor(ms(1700)))
+        assertEquals(1L, ringback.rebufferCount)
+    }
+
     private fun ms(value: Long): Long = value * 1_000_000L
 }
